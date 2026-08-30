@@ -1,0 +1,68 @@
+name: media-manager
+
+services:
+  api:
+    image: ${MEDIA_MANAGER_IMAGE:-media-manager:local}
+    build:
+      context: .
+      args:
+        SOURCE_REVISION: ${MEDIA_MANAGER_SOURCE_REVISION:-unknown}
+    init: true
+    restart: unless-stopped
+    user: "10001:10001"
+    ports:
+      - "127.0.0.1:${MEDIA_MANAGER_PORT:-18081}:8080"
+    environment:
+      MEDIA_MANAGER_AUTH_MODE: cloudflare
+      MEDIA_MANAGER_PUBLIC_BASE_URL: ${MEDIA_MANAGER_PUBLIC_BASE_URL:?Set the public HTTPS origin}
+      MEDIA_MANAGER_CF_ISSUER: ${MEDIA_MANAGER_CF_ISSUER:?Set the Cloudflare Access issuer}
+      MEDIA_MANAGER_CF_AUDIENCE: ${MEDIA_MANAGER_CF_AUDIENCE:?Set the Access application audience}
+      MEDIA_MANAGER_WORK_DIR: /work
+      MEDIA_MANAGER_MAX_UPLOAD_BYTES: "67108864"
+      MEDIA_MANAGER_MAX_OUTPUT_BYTES: "134217728"
+      MEDIA_MANAGER_MAX_LIVE_JOBS: "4"
+      MEDIA_MANAGER_RESULT_TTL_SECONDS: "900"
+      MEDIA_MANAGER_UPLOAD_TIMEOUT_SECONDS: "300"
+      MEDIA_MANAGER_FFMPEG_THREADS: "2"
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=64m,uid=10001,gid=10001,mode=1777
+    volumes:
+      - media-work:/work
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    pids_limit: 128
+    mem_limit: 2g
+    memswap_limit: 2g
+    cpus: 2.0
+    ulimits:
+      core: 0
+      nofile:
+        soft: 256
+        hard: 256
+      fsize:
+        soft: 157286400
+        hard: 157286400
+    stop_grace_period: 15s
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "/app/.venv/bin/python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health/ready', timeout=2).read()",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    logging:
+      driver: local
+      options:
+        max-size: 10m
+        max-file: "3"
+
+volumes:
+  media-work: {}

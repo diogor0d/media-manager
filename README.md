@@ -1,0 +1,251 @@
+<div align="center">
+
+# Media Manager
+
+**A self-hosted media conversion API, built for the iOS Share Sheet**
+
+Upload once · see the exact result size · download only if you want it
+
+[![Python](https://img.shields.io/badge/python-3.12+-3776AB?style=flat-square&logo=python&logoColor=white)](https://www.python.org)
+[![FastAPI](https://img.shields.io/badge/FastAPI-async-009688?style=flat-square&logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com)
+[![FFmpeg](https://img.shields.io/badge/FFmpeg-powered-007808?style=flat-square&logo=ffmpeg&logoColor=white)](https://ffmpeg.org)
+[![Docker](https://img.shields.io/badge/Docker-hardened-2496ED?style=flat-square&logo=docker&logoColor=white)](https://docs.docker.com)
+[![Cloudflare Access](https://img.shields.io/badge/Cloudflare%20Access-integrated-F6821F?style=flat-square&logo=cloudflare&logoColor=white)](https://developers.cloudflare.com/cloudflare-one/)
+[![iOS Shortcut](https://img.shields.io/badge/iOS%20Shortcut-native-000000?style=flat-square&logo=shortcuts&logoColor=white)](shortcuts/spec.md)
+[![License](https://img.shields.io/badge/license-MIT-2C3E50?style=flat-square)](LICENSE)
+
+</div>
+
+---
+
+Media Manager turns a Share Sheet tap into a safe, bounded conversion job on your own server.
+Media is treated as hostile input end to end: uploads are streamed to isolated job directories,
+inspected by content rather than filename, converted through a fixed allowlisted FFmpeg surface,
+and re-probed before they can be downloaded. Every result expires automatically.
+
+> **Status** — Implemented and validated locally (unit, auth, integration, and in-container tests).
+> Not yet deployed to a production host, connected to a live Cloudflare Access application, or
+> authored and tested as an Apple Shortcut. See [deployment guide](docs/deployment.md) for the
+> exact gates.
+
+## Highlights
+
+- **Preview before download** — the client sees the *exact* output byte count and decides whether to fetch it; nothing downloads by surprise.
+- **Closed preset surface** — three quality levels, six resolution caps, keep/drop audio. No codec names, filter strings, bitrates, or arbitrary FFmpeg flags are ever accepted from clients.
+- **Content-based input handling** — MIME type, extension, and original filename never select a parser. Inputs are demuxed through an explicit format allowlist with protocol whitelisting locked to `file`.
+- **Hard resource ceilings** — upload/output byte caps, wall-clock timeouts per media class, dimension/duration/FPS/pixel/stream limits, one conversion at a time, disk-space admission control.
+- **Origin-verified authentication** — Cloudflare Access JWTs are validated at the origin (signature, issuer, audience, expiry), so trust comes from cryptography, not forwarded headers.
+- **Disposable by design** — no database, no durable queue, no user data. A restart cancels jobs and wipes the workspace.
+
+## Architecture
+
+```mermaid
+flowchart LR
+    iphone["iPhone<br/>Share Sheet"] -- "CF-Access headers" --> access["Cloudflare<br/>Access"]
+    access --> tunnel["Cloudflare<br/>Tunnel"]
+    tunnel -- "loopback origin" --> api["FastAPI<br/>streaming upload + queue"]
+    api -- "one at a time" --> ffmpeg["FFmpeg worker<br/>fixed argv"]
+    ffmpeg -- "re-probe + validate" --> ready["Exact size<br/>ready for download"]
+    api --- work[("Disposable<br/>work volume")]
+```
+
+The public path ends at a loopback listener; nothing else is published to the host.
+
+## Conversions
+
+| Target | Output | Accepted sources |
+| --- | --- | --- |
+| `video-mp4` | H.264 + optional AAC | Video, animation |
+| `video-webm` | VP9 + optional Opus | Video, animation |
+| `image-jpeg` | JPEG | Still image |
+| `image-png` | PNG | Still image |
+| `image-webp` | WebP | Still image |
+| `animation-gif` | Palette-generated GIF | Video, still image, animation |
+| `audio-m4a` | AAC | Audio, or a video's audio |
+| `audio-mp3` | MP3 | Audio, or a video's audio |
+| `audio-opus` | Opus in Ogg | Audio, or a video's audio |
+
+Input allowlist: common MOV/MP4, Matroska/WebM, AVI, MPEG, FLV, ASF, GIF, JPEG, PNG, WebP,
+BMP, TIFF, MP3, AAC/M4A, WAV/AIFF, FLAC, and Ogg — subject to the codecs compiled into the
+pinned image. HEIC/HEIF, AVIF, APNG, animated WebP, exotic color profiles, and camera RAW are
+**not advertised** until representative fixtures pass.
+
+## The lifecycle
+
+```
+POST /v1/jobs          →  202  { id, state, status_url }        # one raw file body
+GET  /v1/jobs/{id}     →  queued → processing → ready|failed   # poll
+GET  /v1/jobs/{id}/content                                    # only after you choose to
+DELETE /v1/jobs/{id}                                          # or let it expire
+GET  /v1/capabilities                                         # option set + limits
+```
+
+<details>
+<summary><strong>Example ready response</strong></summary>
+
+```json
+{
+  "id": "82f353b4-33ec-41dd-8466-a1a0271e398f",
+  "state": "ready",
+  "target": "video-mp4",
+  "quality": "balanced",
+  "resolution": "720p",
+  "audio": "keep",
+  "created_at": "2026-08-25T14:30:00Z",
+  "expires_at": "2026-08-25T14:47:12Z",
+  "status_url": "https://media.example.com/v1/jobs/82f353b4-33ec-41dd-8466-a1a0271e398f",
+  "input": {
+    "bytes": 18401932,
+    "media_class": "video",
+    "container": "mov,mp4,m4a,3gp,3g2,mj2",
+    "duration_ms": 42100,
+    "width": 3840,
+    "height": 2160,
+    "video_codec": "hevc",
+    "audio_codec": "aac"
+  },
+  "output": {
+    "bytes": 7131021,
+    "filename": "converted.mp4",
+    "media_type": "video/mp4",
+    "download_url": "https://media.example.com/v1/jobs/82f353b4-33ec-41dd-8466-a1a0271e398f/content",
+    "width": 1280,
+    "height": 720,
+    "duration_ms": 42100
+  },
+  "error": null
+}
+```
+
+</details>
+
+<details>
+<summary><strong>Error codes</strong></summary>
+
+Every failure uses `{"error": {"code": "...", "message": "..."}}`. Codes are stable:
+
+| Area | Codes |
+| --- | --- |
+| Upload | `INPUT_TOO_LARGE`, `EMPTY_INPUT`, `UPLOAD_TIMEOUT`, `RAW_FILE_REQUIRED`, `UNSUPPORTED_ENCODING`, `INVALID_CONTENT_LENGTH`, `INSUFFICIENT_STORAGE` |
+| Options | `INVALID_OPTIONS` |
+| Capacity | `QUEUE_FULL` (with `Retry-After`) |
+| Authentication | `ACCESS_TOKEN_REQUIRED`, `INVALID_ACCESS_TOKEN` |
+| Media | `UNSUPPORTED_MEDIA`, `UNSUPPORTED_CONVERSION`, `MEDIA_LIMIT_EXCEEDED`, `MEDIA_PROBE_TIMEOUT` |
+| Processing | `PROCESSING_TIMEOUT`, `OUTPUT_TOO_LARGE`, `CONVERSION_FAILED` |
+| Job state | `JOB_NOT_FOUND`, `JOB_NOT_READY`, `RESULT_EXPIRED` |
+
+Raw FFmpeg output is never returned to clients.
+
+</details>
+
+## Options & limits
+
+| Option | Values |
+| --- | --- |
+| `quality` | `economy` · `balanced` · `high` |
+| `resolution` | `source` · `480p` · `720p` · `1080p` · `1440p` · `2160p` — a long-edge cap that never upscales |
+| `audio` | `keep` · `drop` — video targets only |
+
+| Resource | Default limit |
+| --- | ---: |
+| Upload / output size | 64 MiB / 128 MiB |
+| Live jobs (incl. retained results) | 4 |
+| Concurrent conversions | 1 |
+| Upload wall time | 5 minutes |
+| Audio/video duration | 10 minutes |
+| GIF duration / input pixels | 15 s / 4 MP |
+| Visual dimensions | 50 MP total · 16,384 px per axis |
+| Result retention | 15 minutes |
+
+## Authentication
+
+Clients present a Cloudflare Access **service token** (`CF-Access-Client-Id` /
+`CF-Access-Client-Secret`) on every request. Cloudflare authenticates the pair at the edge;
+the API then independently verifies the injected `Cf-Access-Jwt-Assertion` before any work
+happens. Jobs belong to their principal — another principal gets the same `404` as a missing job.
+
+The server stores **no secrets**: only non-secret Access metadata (issuer, audience, public
+origin). Tokens live solely on authorized devices — never in `.env`, Git, logs, or an exported
+Shortcut. Use one dedicated short-lived token per device under a `Service Auth` policy.
+
+## Getting started
+
+**Local development** (Python 3.12+, `uv`, FFmpeg):
+
+```powershell
+uv sync --all-groups
+
+$env:MEDIA_MANAGER_AUTH_MODE = "disabled"
+$env:MEDIA_MANAGER_PUBLIC_BASE_URL = "http://127.0.0.1:8080"
+uv run uvicorn media_manager.main:app --host 127.0.0.1 --port 8080
+```
+
+What it does: starts the API on loopback with authentication disabled for local testing only —
+never use this mode beyond your own machine.
+
+**Checks:**
+
+```powershell
+uv run ruff check .
+uv run pytest
+docker compose --env-file .env.example config --quiet
+```
+
+What it does: lints, runs all tests (including real-FFmpeg conversion of every target), and
+validates Compose syntax without rendering production values.
+
+**Production image:**
+
+```bash
+revision="$(git rev-parse HEAD)"
+docker build --build-arg SOURCE_REVISION="$revision" --tag "media-manager:$revision" .
+```
+
+What it does: builds the digest-pinned image from a clean commit and labels it with that revision.
+
+## iOS Shortcut
+
+[`shortcuts/spec.md`](shortcuts/spec.md) is a credential-free, action-by-action native
+specification: Share Sheet intake, option menus, one upload, bounded polling, exact-size preview,
+cancel-before-download, save/share, and cleanup.
+
+Honest platform note: Apple has no supported way to create, sign, and silently install a
+Shortcut from Windows. The intended flow is authoring the graph once on an Apple device,
+exporting a credential-free master, and distributing via iCloud link or signed file — import
+stays user-confirmed. [`shortcuts/tests/on-device.md`](shortcuts/tests/on-device.md) gates releases.
+
+## Documentation
+
+| Document | Contents |
+| --- | --- |
+| [`docs/security.md`](docs/security.md) | Threat model, enforced invariants, container controls, residual risks, verification checklist |
+| [`docs/deployment.md`](docs/deployment.md) | Deployment guide: architecture, pre-deployment gates, validation matrix, rollback |
+| [`shortcuts/README.md`](shortcuts/README.md) | Security model for tokens, authoring/export workflow, release gate |
+| [`docs`](docs/) · [`shortcuts`](shortcuts/) · [`tests`](tests/) | Everything above, plus the test suite |
+
+## License
+
+Media Manager's original source and documentation are available under the
+[MIT License](LICENSE). Docker images also contain third-party software under
+its own licenses, including a GPL-enabled FFmpeg build; see
+[`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md) before redistributing an
+image.
+
+## Repository layout
+
+```text
+media-manager/
+├── src/media_manager/     # FastAPI app, jobs, processor, auth, config
+├── tests/                 # API, auth, and real-FFmpeg integration suites
+├── shortcuts/             # Credential-free native Shortcut spec + release gate
+├── docs/                  # Security model and deployment preparation
+├── Dockerfile             # Digest-pinned, non-root, read-only-friendly
+└── compose.yaml           # Loopback-only hardened service definition
+```
+
+<div align="center">
+
+**Non-goals**, stated plainly: durable jobs · URL imports · archives/documents/SVG/camera RAW ·
+stream copy · metadata preservation · guaranteed smaller files · supporting everything FFmpeg can parse.
+
+</div>
