@@ -18,10 +18,12 @@ services:
       MEDIA_MANAGER_CF_ISSUER: ${MEDIA_MANAGER_CF_ISSUER:?Set the Cloudflare Access issuer}
       MEDIA_MANAGER_CF_AUDIENCE: ${MEDIA_MANAGER_CF_AUDIENCE:?Set the Access application audience}
       MEDIA_MANAGER_WORK_DIR: /work
-      MEDIA_MANAGER_MAX_UPLOAD_BYTES: "67108864"
-      MEDIA_MANAGER_MAX_OUTPUT_BYTES: "134217728"
-      MEDIA_MANAGER_MAX_LIVE_JOBS: "4"
+      MEDIA_MANAGER_MAX_UPLOAD_BYTES: "5368709120"
+      MEDIA_MANAGER_MAX_OUTPUT_BYTES: "5368709120"
+      MEDIA_MANAGER_MAX_CHUNK_BYTES: "52428800"
+      MEDIA_MANAGER_MAX_LIVE_JOBS: "1"
       MEDIA_MANAGER_RESULT_TTL_SECONDS: "900"
+      MEDIA_MANAGER_UPLOAD_SESSION_TTL_SECONDS: "7200"
       MEDIA_MANAGER_UPLOAD_TIMEOUT_SECONDS: "300"
       MEDIA_MANAGER_FFMPEG_THREADS: "2"
     read_only: true
@@ -43,8 +45,8 @@ services:
         soft: 256
         hard: 256
       fsize:
-        soft: 157286400
-        hard: 157286400
+        soft: 6442450944
+        hard: 6442450944
     stop_grace_period: 15s
     healthcheck:
       test:

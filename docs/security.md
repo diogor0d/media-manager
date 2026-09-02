@@ -63,9 +63,14 @@ Outbound HTTPS remains available because Access signing keys must be refreshed.
 - `-protocol_whitelist file` blocks normal network protocols; it is not an
   egress firewall after native-code compromise. Stronger isolation would put
   conversion in a separate no-network worker sandbox or VM.
-- The named Docker work volume has no portable hard quota. Application bounds
-  cap ordinary files to approximately 768 MiB at four live jobs, but production
-  still needs quota/capacity verification and alerting.
+- The named Docker work volume has no portable hard quota. One live job can
+  reserve up to 5 GiB of input and 5 GiB of output, so production still needs
+  at least 10 GiB plus operational headroom, capacity verification, and alerts.
+- Browser uploads are split into 50 MiB requests because Cloudflare rejects a
+  5 GiB request body. Every session and chunk remains bound to the independently
+  verified Access principal; offsets, declared total, chunk size, and expiry are
+  enforced at the origin. An authenticated user can still occupy the single job
+  slot until deletion or the two-hour incomplete-upload expiry.
 - The container installs the current Debian FFmpeg security package when built.
   The Python and uv bases are digest-pinned, but Debian package repository state
   is not immutable. Record the final image digest, package inventory, and build
@@ -96,13 +101,15 @@ Before deployment, verify at minimum:
 
 1. Missing, invalid, expired, wrong-audience, and wrong-issuer assertions fail.
 2. A valid service token succeeds and a no-token request is denied at the edge.
-3. Jobs are invisible across principals.
-4. Oversized fixed-length and streamed uploads leave no files.
-5. HLS, concat, malformed, excessive-dimension, excessive-duration, and
+3. A valid interactive Access session loads the web root and assets, while
+   cross-site browser mutations are rejected.
+4. Jobs are invisible across principals.
+5. Oversized fixed-length and streamed uploads leave no files.
+6. HLS, concat, malformed, excessive-dimension, excessive-duration, and
    excessive-stream fixtures fail within limits and cause no outbound request.
-6. Cancellation and timeout terminate every FFmpeg process and remove partials.
-7. Outputs contain only the expected streams/codecs and no source metadata.
-8. The container has no public/LAN/IPv6 listener, capabilities, writable root,
+7. Cancellation and timeout terminate every FFmpeg process and remove partials.
+8. Outputs contain only the expected streams/codecs and no source metadata.
+9. The container has no public/LAN/IPv6 listener, capabilities, writable root,
    Docker socket, device, or unexpected egress requirement.
-9. Image and dependency scanning findings are reviewed against the actual image
+10. Image and dependency scanning findings are reviewed against the actual image
    digest; a clean scan is not treated as proof of safety.

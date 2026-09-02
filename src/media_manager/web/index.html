@@ -1,0 +1,127 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#e8eeec">
+  <meta name="description" content="Fast, private media conversion on your own server.">
+  <title>Media Manager</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/assets/app.css">
+  <script src="/assets/app.js" defer></script>
+</head>
+<body>
+  <header class="masthead">
+    <a class="brand" href="/" aria-label="Media Manager home">
+      <img src="/assets/logo.svg" alt="Media Manager" width="248" height="48">
+    </a>
+    <p class="service-note"><span aria-hidden="true"></span>Private conversion bench</p>
+  </header>
+
+  <main>
+    <section class="intro" aria-labelledby="page-title">
+      <p class="eyebrow">ONE FILE · ONE UPLOAD · NO HISTORY</p>
+      <h1 id="page-title">Change the format.<br><em>Keep the decision.</em></h1>
+      <p>Inspect a file locally, choose a precise output, then download only when the result is worth keeping.</p>
+    </section>
+
+    <section class="bench" aria-label="Media conversion">
+      <div id="drop-zone" class="drop-zone" tabindex="0" role="button" aria-controls="file-input">
+        <input id="file-input" type="file" hidden>
+        <div class="drop-mark" aria-hidden="true"><span></span><i></i></div>
+        <div>
+          <p class="drop-title">Drop one media file</p>
+          <p class="drop-copy">or <span>choose from this device</span></p>
+        </div>
+        <p id="limit-copy" class="limit-copy">Loading server limit…</p>
+      </div>
+
+      <div id="workspace" class="workspace" hidden>
+        <article class="source-panel">
+          <div class="section-label"><span>Source</span><button id="replace-file" type="button">Replace</button></div>
+          <div id="preview" class="preview" aria-label="Local file preview"></div>
+          <h2 id="file-name" class="file-name"></h2>
+          <dl class="file-facts">
+            <div><dt>Detected</dt><dd id="file-type"></dd></div>
+            <div><dt>Size</dt><dd id="file-size"></dd></div>
+            <div id="dimensions-fact" hidden><dt>Frame</dt><dd id="file-dimensions"></dd></div>
+            <div id="duration-fact" hidden><dt>Length</dt><dd id="file-duration"></dd></div>
+          </dl>
+          <p class="provisional">Local detection. The server verifies file contents during conversion.</p>
+        </article>
+
+        <div id="aperture" class="aperture" aria-hidden="true"><span></span><i></i><b></b></div>
+
+        <form id="conversion-form" class="output-panel">
+          <div class="section-label"><span>Output</span><small id="target-count"></small></div>
+          <fieldset>
+            <legend>Format</legend>
+            <div id="target-options" class="target-options"></div>
+          </fieldset>
+
+          <div class="option-grid">
+            <fieldset>
+              <legend>Quality</legend>
+              <div id="quality-options" class="segment-options"></div>
+            </fieldset>
+            <label id="resolution-field" class="select-field">
+              <span>Resolution</span>
+              <select id="resolution-select"></select>
+            </label>
+          </div>
+
+          <fieldset id="audio-field" hidden>
+            <legend>Sound</legend>
+            <div id="audio-options" class="segment-options"></div>
+          </fieldset>
+
+          <button id="convert-button" class="primary-action" type="submit">
+            <span>Convert</span><strong id="convert-extension"></strong>
+          </button>
+        </form>
+      </div>
+
+      <div id="progress-view" class="progress-view" hidden>
+        <div class="process-aperture" aria-hidden="true"><span></span><i></i><b></b></div>
+        <p id="progress-kicker" class="eyebrow">UPLOADING</p>
+        <h2 id="progress-title">Sending the file once…</h2>
+        <div id="upload-meter" class="upload-meter" role="progressbar" aria-label="Upload progress" aria-valuemin="0" aria-valuemax="100">
+          <span id="upload-bar"></span>
+        </div>
+        <p id="progress-detail" class="progress-detail"></p>
+        <button id="cancel-button" class="text-action" type="button">Cancel and discard</button>
+      </div>
+
+      <div id="result-view" class="result-view" hidden>
+        <p class="ready-label"><span aria-hidden="true"></span>Ready</p>
+        <h2>The result is yours to judge.</h2>
+        <div class="receipt">
+          <div><span>Input</span><strong id="result-input-size"></strong><small id="result-input-meta"></small></div>
+          <div class="receipt-arrow" aria-hidden="true">→</div>
+          <div><span>Output</span><strong id="result-output-size"></strong><small id="result-output-meta"></small></div>
+        </div>
+        <p id="size-difference" class="size-difference"></p>
+        <p id="expiry-copy" class="expiry-copy"></p>
+        <div class="result-actions">
+          <a id="download-button" class="primary-action" href="#" download>Download <strong id="download-extension"></strong></a>
+          <button id="discard-button" class="secondary-action" type="button">Discard result</button>
+        </div>
+      </div>
+
+      <div id="error-view" class="error-view" role="alert" hidden>
+        <p class="eyebrow">CONVERSION STOPPED</p>
+        <h2 id="error-title">This file could not be converted.</h2>
+        <p id="error-detail"></p>
+        <button id="try-again-button" class="secondary-action" type="button">Choose another file</button>
+      </div>
+    </section>
+
+    <p id="live-status" class="sr-only" aria-live="polite"></p>
+  </main>
+
+  <footer>
+    <p>Files are processed as disposable jobs and removed automatically.</p>
+    <p>No trackers · No external assets · No browser storage</p>
+  </footer>
+</body>
+</html>

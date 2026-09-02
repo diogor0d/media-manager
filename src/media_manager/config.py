@@ -36,10 +36,12 @@ class Settings:
     cloudflare_audience: str | None = None
     ffmpeg_path: str = "/usr/bin/ffmpeg"
     ffprobe_path: str = "/usr/bin/ffprobe"
-    max_upload_bytes: int = 64 * 1024 * 1024
-    max_output_bytes: int = 128 * 1024 * 1024
-    max_live_jobs: int = 4
+    max_upload_bytes: int = 5 * 1024 * 1024 * 1024
+    max_output_bytes: int = 5 * 1024 * 1024 * 1024
+    max_chunk_bytes: int = 50 * 1024 * 1024
+    max_live_jobs: int = 1
     result_ttl_seconds: int = 15 * 60
+    upload_session_ttl_seconds: int = 2 * 60 * 60
     cleanup_interval_seconds: int = 30
     upload_timeout_seconds: int = 5 * 60
     probe_timeout_seconds: int = 15
@@ -94,8 +96,10 @@ class Settings:
         numeric_values = {
             "max_upload_bytes": self.max_upload_bytes,
             "max_output_bytes": self.max_output_bytes,
+            "max_chunk_bytes": self.max_chunk_bytes,
             "max_live_jobs": self.max_live_jobs,
             "result_ttl_seconds": self.result_ttl_seconds,
+            "upload_session_ttl_seconds": self.upload_session_ttl_seconds,
             "cleanup_interval_seconds": self.cleanup_interval_seconds,
             "upload_timeout_seconds": self.upload_timeout_seconds,
             "probe_timeout_seconds": self.probe_timeout_seconds,
@@ -134,13 +138,19 @@ class Settings:
             ffmpeg_path=os.getenv("MEDIA_MANAGER_FFMPEG_PATH", "/usr/bin/ffmpeg"),
             ffprobe_path=os.getenv("MEDIA_MANAGER_FFPROBE_PATH", "/usr/bin/ffprobe"),
             max_upload_bytes=_positive_int(
-                "MEDIA_MANAGER_MAX_UPLOAD_BYTES", 64 * 1024 * 1024
+                "MEDIA_MANAGER_MAX_UPLOAD_BYTES", 5 * 1024 * 1024 * 1024
             ),
             max_output_bytes=_positive_int(
-                "MEDIA_MANAGER_MAX_OUTPUT_BYTES", 128 * 1024 * 1024
+                "MEDIA_MANAGER_MAX_OUTPUT_BYTES", 5 * 1024 * 1024 * 1024
             ),
-            max_live_jobs=_positive_int("MEDIA_MANAGER_MAX_LIVE_JOBS", 4),
+            max_chunk_bytes=_positive_int(
+                "MEDIA_MANAGER_MAX_CHUNK_BYTES", 50 * 1024 * 1024
+            ),
+            max_live_jobs=_positive_int("MEDIA_MANAGER_MAX_LIVE_JOBS", 1),
             result_ttl_seconds=_positive_int("MEDIA_MANAGER_RESULT_TTL_SECONDS", 15 * 60),
+            upload_session_ttl_seconds=_positive_int(
+                "MEDIA_MANAGER_UPLOAD_SESSION_TTL_SECONDS", 2 * 60 * 60
+            ),
             cleanup_interval_seconds=_positive_int(
                 "MEDIA_MANAGER_CLEANUP_INTERVAL_SECONDS", 30
             ),

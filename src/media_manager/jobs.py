@@ -4,6 +4,8 @@ import asyncio
 import logging
 import shutil
 import uuid
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -18,6 +20,7 @@ from media_manager.models import (
     JobView,
     MediaMetadata,
     OutputMetadata,
+    UploadView,
 )
 from media_manager.processor import ConversionCancelled, ConversionResult
 
@@ -44,14 +47,16 @@ class JobRecord:
     directory: Path
     input_path: Path
     created_at: datetime
-    state: JobState = JobState.QUEUED
+    state: JobState = JobState.UPLOADING
     input_bytes: int = 0
+    expected_input_bytes: int | None = None
     input_metadata: MediaMetadata | None = None
     output_metadata: OutputMetadata | None = None
     output_path: Path | None = None
     error: JobError | None = None
     expires_at: datetime | None = None
     cancel_event: asyncio.Event = field(default_factory=asyncio.Event)
+    upload_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
 
 class JobManager:
@@ -106,7 +111,12 @@ class JobManager:
             self._jobs.clear()
         await asyncio.gather(*(self._remove_directory(job.directory) for job in jobs))
 
-    async def reserve(self, principal_id: str, options: ConversionOptions) -> JobRecord:
+    async def reserve(
+        self,
+        principal_id: str,
+        options: ConversionOptions,
+        expected_input_bytes: int | None = None,
+    ) -> JobRecord:
         async with self._lock:
             if len(self._jobs) >= self._settings.max_live_jobs:
                 raise ApiError(
@@ -149,6 +159,9 @@ class JobManager:
                 directory=directory,
                 input_path=directory / "input",
                 created_at=datetime.now(UTC),
+                expected_input_bytes=expected_input_bytes,
+                expires_at=datetime.now(UTC)
+                + timedelta(seconds=self._settings.upload_session_ttl_seconds),
             )
             self._jobs[job_id] = job
             return job
@@ -158,10 +171,62 @@ class JobManager:
             job = self._jobs.get(job_id)
             if job is None:
                 raise ApiError(404, "JOB_NOT_FOUND", "Job was not found")
+            if job.state is not JobState.UPLOADING:
+                raise ApiError(409, "UPLOAD_ALREADY_COMPLETED", "Upload is already complete")
+            if job.expected_input_bytes is not None and input_bytes != job.expected_input_bytes:
+                raise ApiError(409, "UPLOAD_INCOMPLETE", "Upload is incomplete")
             job.input_bytes = input_bytes
+            job.state = JobState.QUEUED
+            job.expires_at = None
             view = self._snapshot(job)
         await self._queue.put(job_id)
         return view
+
+    async def upload_view(self, job_id: str, principal_id: str) -> UploadView:
+        async with self._lock:
+            job = self._authorized_job(job_id, principal_id)
+            return self._upload_snapshot(job)
+
+    @asynccontextmanager
+    async def upload_chunk(
+        self,
+        job_id: str,
+        principal_id: str,
+        offset: int,
+    ) -> AsyncIterator[JobRecord]:
+        async with self._lock:
+            job = self._authorized_job(job_id, principal_id)
+            upload_lock = job.upload_lock
+
+        await upload_lock.acquire()
+        try:
+            async with self._lock:
+                current = self._authorized_job(job_id, principal_id)
+                if current is not job or job.state is not JobState.UPLOADING:
+                    raise ApiError(409, "UPLOAD_ALREADY_COMPLETED", "Upload is already complete")
+                if offset != job.input_bytes:
+                    raise ApiError(
+                        409,
+                        "UPLOAD_OFFSET_MISMATCH",
+                        "Upload offset does not match the server",
+                    )
+            yield job
+        finally:
+            upload_lock.release()
+
+    async def advance_upload(self, job: JobRecord, received: int) -> UploadView:
+        async with self._lock:
+            current = self._jobs.get(job.id)
+            if current is not job or job.state is not JobState.UPLOADING:
+                raise ApiError(404, "JOB_NOT_FOUND", "Job was not found")
+            expected = job.expected_input_bytes
+            if expected is None or job.input_bytes + received > expected:
+                raise ApiError(413, "INPUT_TOO_LARGE", "Upload exceeds its declared size")
+            job.input_bytes += received
+            job.expires_at = datetime.now(UTC) + timedelta(
+                seconds=self._settings.upload_session_ttl_seconds
+            )
+            return self._upload_snapshot(job)
 
     async def discard(self, job_id: str) -> None:
         async with self._lock:
@@ -169,7 +234,7 @@ class JobManager:
             if job:
                 job.cancel_event.set()
         if job:
-            await self._remove_directory(job.directory)
+            await self._remove_record_directory(job)
 
     async def get(self, job_id: str, principal_id: str) -> JobView:
         async with self._lock:
@@ -197,7 +262,7 @@ class JobManager:
             job.cancel_event.set()
 
         if job.state is not JobState.PROCESSING:
-            await self._remove_directory(job.directory)
+            await self._remove_record_directory(job)
 
     def _authorized_job(self, job_id: str, principal_id: str) -> JobRecord:
         job = self._jobs.get(job_id)
@@ -219,6 +284,22 @@ class JobManager:
             input=job.input_metadata,
             output=job.output_metadata,
             error=job.error,
+        )
+
+    def _upload_snapshot(self, job: JobRecord) -> UploadView:
+        if (
+            job.state is not JobState.UPLOADING
+            or job.expected_input_bytes is None
+            or job.expires_at is None
+        ):
+            raise ApiError(409, "UPLOAD_ALREADY_COMPLETED", "Upload is already complete")
+        return UploadView(
+            id=job.id,
+            offset=job.input_bytes,
+            length=job.expected_input_bytes,
+            chunk_size=min(self._settings.max_chunk_bytes, self._settings.max_upload_bytes),
+            upload_url=f"{self._settings.public_base_url}/v1/uploads/{job.id}",
+            expires_at=job.expires_at,
         )
 
     async def _worker(self) -> None:
@@ -323,7 +404,7 @@ class JobManager:
                 for job in expired:
                     self._jobs.pop(job.id, None)
                     job.cancel_event.set()
-            await asyncio.gather(*(self._remove_directory(job.directory) for job in expired))
+            await asyncio.gather(*(self._remove_record_directory(job) for job in expired))
 
     async def _remove_orphans(self) -> None:
         children = list(self._settings.work_dir.iterdir())
@@ -339,6 +420,14 @@ class JobManager:
     @classmethod
     async def _remove_directory(cls, path: Path) -> None:
         await cls._remove_path(path)
+
+    @classmethod
+    async def _remove_record_directory(cls, job: JobRecord) -> None:
+        if job.state is JobState.UPLOADING:
+            async with job.upload_lock:
+                await cls._remove_directory(job.directory)
+        else:
+            await cls._remove_directory(job.directory)
 
     @classmethod
     async def _remove_job_files(cls, directory: Path) -> None:

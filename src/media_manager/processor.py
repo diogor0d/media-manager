@@ -226,6 +226,7 @@ class ConversionCancelled(Exception):
 
 
 def target_capabilities() -> list[TargetCapability]:
+    all_resolutions = list(Resolution)
     return [
         TargetCapability(
             value=target,
@@ -233,6 +234,18 @@ def target_capabilities() -> list[TargetCapability]:
             media_type=spec.media_type,
             extension=spec.extension,
             accepts=sorted(spec.accepts, key=lambda media_class: media_class.value),
+            allowed_resolutions=(
+                [Resolution.SOURCE]
+                if target in {Target.AUDIO_M4A, Target.AUDIO_MP3, Target.AUDIO_OPUS}
+                else all_resolutions[:4]
+                if target is Target.ANIMATION_GIF
+                else all_resolutions
+            ),
+            allowed_audio_modes=(
+                list(AudioMode)
+                if target in {Target.VIDEO_MP4, Target.VIDEO_WEBM}
+                else [AudioMode.KEEP]
+            ),
         )
         for target, spec in TARGET_SPECS.items()
     ]

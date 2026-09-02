@@ -48,8 +48,10 @@ async def test_cloudflare_mode_rejects_a_missing_assertion_but_keeps_health_loca
         httpx.AsyncClient(transport=transport, base_url="http://testserver") as client,
     ):
         assert (await client.get("/health/ready")).status_code == 200
+        web_response = await client.get("/")
         response = await client.get("/v1/capabilities")
 
+    assert web_response.status_code == 401
     assert response.status_code == 401
     assert response.json() == {
         "error": {

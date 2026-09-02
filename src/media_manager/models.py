@@ -39,6 +39,7 @@ class AudioMode(StrEnum):
 
 
 class JobState(StrEnum):
+    UPLOADING = "uploading"
     QUEUED = "queued"
     PROCESSING = "processing"
     READY = "ready"
@@ -122,6 +123,8 @@ class TargetCapability(BaseModel):
     media_type: str
     extension: str
     accepts: list[MediaClass]
+    allowed_resolutions: list[Resolution]
+    allowed_audio_modes: list[AudioMode]
 
 
 class Capabilities(BaseModel):
@@ -130,4 +133,14 @@ class Capabilities(BaseModel):
     resolutions: list[CapabilityOption]
     audio_modes: list[CapabilityOption]
     max_upload_bytes: int
+    max_chunk_bytes: int
     result_ttl_seconds: int
+
+
+class UploadView(BaseModel):
+    id: str
+    offset: int = Field(ge=0)
+    length: int = Field(gt=0)
+    chunk_size: int = Field(gt=0)
+    upload_url: str
+    expires_at: datetime

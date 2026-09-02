@@ -1,7 +1,7 @@
 [project]
 name = "media-manager"
 version = "0.1.0"
-description = "A bounded media conversion API for mobile automations"
+description = "A bounded, self-hosted media converter for the web and mobile automations"
 readme = "README.md"
 license = { file = "LICENSE" }
 requires-python = ">=3.12"

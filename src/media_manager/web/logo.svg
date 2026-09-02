@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 330 64" role="img" aria-labelledby="title desc">
+  <title id="title">Media Manager</title>
+  <desc id="desc">A source slab passes through an aperture and becomes a compact output.</desc>
+  <g transform="translate(4 8)">
+    <path fill="#101719" d="M0 2h19v42H0V11l9-9Zm6 10v25h7V8h-2Z"/>
+    <path fill="#F05A3C" fill-rule="evenodd" d="M22 0h7v46h-7Zm2 19h3v7h-3Z"/>
+    <path fill="#3157D5" d="M32 12h13v22H32Z"/>
+  </g>
+  <text x="66" y="30" fill="#101719" font-family="Arial, Helvetica, sans-serif" font-size="23" font-weight="800" letter-spacing="1.5">MEDIA</text>
+  <text x="66" y="51" fill="#556164" font-family="Arial, Helvetica, sans-serif" font-size="17" font-weight="600" letter-spacing="4.2">MANAGER</text>
+</svg>

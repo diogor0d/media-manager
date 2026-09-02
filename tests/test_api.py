@@ -192,7 +192,26 @@ async def test_capabilities_report_the_supported_contract_and_limits(tmp_path: P
         response = await client.get("/v1/capabilities")
 
     assert response.status_code == 200
-    assert response.json() == {
+    body = response.json()
+    all_resolutions = ["source", "480p", "720p", "1080p", "1440p", "2160p"]
+    expected_matrices = {
+        "video-mp4": (all_resolutions, ["keep", "drop"]),
+        "video-webm": (all_resolutions, ["keep", "drop"]),
+        "image-jpeg": (all_resolutions, ["keep"]),
+        "image-png": (all_resolutions, ["keep"]),
+        "image-webp": (all_resolutions, ["keep"]),
+        "animation-gif": (all_resolutions[:4], ["keep"]),
+        "audio-m4a": (["source"], ["keep"]),
+        "audio-mp3": (["source"], ["keep"]),
+        "audio-opus": (["source"], ["keep"]),
+    }
+    for target in body["targets"]:
+        assert (
+            target.pop("allowed_resolutions"),
+            target.pop("allowed_audio_modes"),
+        ) == expected_matrices[target["value"]]
+
+    assert body == {
         "targets": [
             {
                 "value": "video-mp4",
@@ -276,8 +295,256 @@ async def test_capabilities_report_the_supported_contract_and_limits(tmp_path: P
             {"value": "drop", "label": "Remove audio"},
         ],
         "max_upload_bytes": 789,
+        "max_chunk_bytes": 789,
         "result_ttl_seconds": 456,
     }
+
+
+async def test_authenticated_chunk_upload_resumes_by_offset_then_converts(
+    tmp_path: Path,
+) -> None:
+    settings = make_settings(tmp_path, max_chunk_bytes=32)
+    processor = FakeProcessor(blocked=True)
+    app = create_app(settings, processor=processor)
+
+    async with running_client(app) as client:
+        created = await client.post(
+            "/v1/uploads",
+            params={"target": "video-mp4", "resolution": "720p"},
+            headers={"Upload-Length": str(len(SOURCE_CONTENT))},
+        )
+        assert created.status_code == 201
+        upload = created.json()
+        job_id = upload["id"]
+        assert upload == {
+            "id": job_id,
+            "offset": 0,
+            "length": len(SOURCE_CONTENT),
+            "chunk_size": 32,
+            "upload_url": f"{PUBLIC_BASE_URL}/v1/uploads/{job_id}",
+            "expires_at": upload["expires_at"],
+        }
+
+        incomplete = await client.post(f"/v1/uploads/{job_id}/complete")
+        assert_error(incomplete, 409, "UPLOAD_INCOMPLETE", "Upload is incomplete")
+
+        first_chunk = SOURCE_CONTENT[:16]
+        first = await client.patch(
+            f"/v1/uploads/{job_id}",
+            content=first_chunk,
+            headers={
+                "Content-Type": "application/offset+octet-stream",
+                "Upload-Offset": "0",
+            },
+        )
+        assert first.status_code == 200
+        assert first.json()["offset"] == len(first_chunk)
+
+        wrong_offset = await client.patch(
+            f"/v1/uploads/{job_id}",
+            content=b"bad",
+            headers={"Upload-Offset": "0"},
+        )
+        assert_error(
+            wrong_offset,
+            409,
+            "UPLOAD_OFFSET_MISMATCH",
+            "Upload offset does not match the server",
+        )
+        assert (await client.get(f"/v1/uploads/{job_id}")).json()["offset"] == 16
+
+        second = await client.patch(
+            f"/v1/uploads/{job_id}",
+            content=SOURCE_CONTENT[16:],
+            headers={"Upload-Offset": "16"},
+        )
+        assert second.status_code == 200
+        assert second.json()["offset"] == len(SOURCE_CONTENT)
+
+        completed = await client.post(f"/v1/uploads/{job_id}/complete")
+        assert completed.status_code == 202
+        assert completed.json()["state"] == "queued"
+        await asyncio.wait_for(processor.convert_started.wait(), timeout=5)
+        assert processor.inputs == [SOURCE_CONTENT]
+
+        processor.release.set()
+        await asyncio.wait_for(processor.convert_finished.wait(), timeout=5)
+        ready = await wait_for_state(client, job_id, "ready")
+        assert ready["output"]["bytes"] == len(OUTPUT_CONTENT)
+        assert (await client.delete(f"/v1/jobs/{job_id}")).status_code == 204
+        assert list(settings.work_dir.iterdir()) == []
+
+
+async def test_chunk_size_limit_is_enforced_before_writing(tmp_path: Path) -> None:
+    settings = make_settings(tmp_path, max_chunk_bytes=4)
+    processor = FakeProcessor()
+    app = create_app(settings, processor=processor)
+
+    async with running_client(app) as client:
+        created = await client.post(
+            "/v1/uploads",
+            params={"target": "video-mp4"},
+            headers={"Upload-Length": "8"},
+        )
+        job_id = created.json()["id"]
+        response = await client.patch(
+            f"/v1/uploads/{job_id}",
+            content=b"12345",
+            headers={"Upload-Offset": "0"},
+        )
+
+        assert_error(response, 413, "CHUNK_TOO_LARGE", "Upload chunk exceeds the size limit")
+        assert (settings.work_dir / job_id / "input").read_bytes() == b""
+        assert (await client.delete(f"/v1/jobs/{job_id}")).status_code == 204
+
+
+async def test_deleting_an_active_chunk_waits_then_removes_partial_upload(
+    tmp_path: Path,
+) -> None:
+    settings = make_settings(tmp_path, max_chunk_bytes=16)
+    app = create_app(settings, processor=FakeProcessor())
+    chunk_started = asyncio.Event()
+    release_chunk = asyncio.Event()
+
+    async def slow_chunk() -> AsyncIterator[bytes]:
+        yield b"1234"
+        chunk_started.set()
+        await release_chunk.wait()
+        yield b"5678"
+
+    async with running_client(app) as client:
+        created = await client.post(
+            "/v1/uploads",
+            params={"target": "video-mp4"},
+            headers={"Upload-Length": "8"},
+        )
+        job_id = created.json()["id"]
+        patch_task = asyncio.create_task(
+            client.patch(
+                f"/v1/uploads/{job_id}",
+                content=slow_chunk(),
+                headers={"Upload-Offset": "0", "Content-Length": "8"},
+            )
+        )
+        await asyncio.wait_for(chunk_started.wait(), timeout=5)
+        delete_task = asyncio.create_task(client.delete(f"/v1/jobs/{job_id}"))
+        await asyncio.sleep(0)
+        assert not delete_task.done()
+
+        release_chunk.set()
+        patch_response, delete_response = await asyncio.gather(patch_task, delete_task)
+
+        assert patch_response.status_code == 404
+        assert delete_response.status_code == 204
+        assert list(settings.work_dir.iterdir()) == []
+
+
+async def test_upload_sessions_are_hidden_from_other_principals(tmp_path: Path) -> None:
+    settings = make_settings(tmp_path, max_chunk_bytes=16)
+    app = create_app(settings, processor=FakeProcessor())
+
+    async def principal_from_header(request: Request) -> Principal:
+        return Principal(id=f"test:{request.headers['X-Test-Principal']}")
+
+    app.dependency_overrides[get_principal] = principal_from_header
+    owner = {"X-Test-Principal": "owner"}
+    other = {"X-Test-Principal": "other"}
+
+    async with running_client(app) as client:
+        created = await client.post(
+            "/v1/uploads",
+            params={"target": "video-mp4"},
+            headers={**owner, "Upload-Length": "8"},
+        )
+        job_id = created.json()["id"]
+
+        assert_error(
+            await client.get(f"/v1/uploads/{job_id}", headers=other),
+            404,
+            "JOB_NOT_FOUND",
+            "Job was not found",
+        )
+        assert_error(
+            await client.patch(
+                f"/v1/uploads/{job_id}",
+                content=b"1234",
+                headers={**other, "Upload-Offset": "0"},
+            ),
+            404,
+            "JOB_NOT_FOUND",
+            "Job was not found",
+        )
+        assert_error(
+            await client.post(f"/v1/uploads/{job_id}/complete", headers=other),
+            404,
+            "JOB_NOT_FOUND",
+            "Job was not found",
+        )
+        assert (await client.delete(f"/v1/jobs/{job_id}", headers=owner)).status_code == 204
+
+
+async def test_web_interface_and_assets_are_served_with_browser_security_headers(
+    tmp_path: Path,
+) -> None:
+    app = create_app(make_settings(tmp_path), processor=FakeProcessor())
+
+    async with running_client(app) as client:
+        responses = {
+            path: await client.get(path)
+            for path in (
+                "/",
+                "/assets/app.css",
+                "/assets/app.js",
+                "/assets/logo.svg",
+                "/favicon.svg",
+            )
+        }
+        schema = await client.get("/openapi.json")
+
+    assert "Drop one media file" in responses["/"].text
+    assert "--aperture" in responses["/assets/app.css"].text
+    assert '"use strict"' in responses["/assets/app.js"].text
+    assert "Media Manager" in responses["/assets/logo.svg"].text
+    assert responses["/favicon.svg"].headers["content-type"] == "image/svg+xml"
+    for response in responses.values():
+        assert response.status_code == 200
+        assert response.headers["x-content-type-options"] == "nosniff"
+        assert response.headers["x-frame-options"] == "DENY"
+        assert "default-src 'none'" in response.headers["content-security-policy"]
+    assert schema.status_code == 200
+    assert schema.json()["info"]["title"] == "Media Manager API"
+
+
+async def test_cross_site_browser_upload_is_rejected_before_job_reservation(
+    tmp_path: Path,
+) -> None:
+    settings = make_settings(tmp_path)
+    processor = FakeProcessor()
+    app = create_app(settings, processor=processor)
+
+    async with running_client(app) as client:
+        response = await client.post(
+            "/v1/jobs",
+            params={"target": "video-mp4"},
+            content=SOURCE_CONTENT,
+            headers={"Origin": "https://attacker.example", "Sec-Fetch-Site": "cross-site"},
+        )
+        missing_origin = await client.post(
+            "/v1/jobs",
+            params={"target": "video-mp4"},
+            content=SOURCE_CONTENT,
+            headers={"User-Agent": "Mozilla/5.0", "Sec-Fetch-Mode": "cors"},
+        )
+
+    assert_error(response, 403, "CROSS_SITE_REQUEST", "Cross-site requests are not allowed")
+    assert_error(
+        missing_origin,
+        403,
+        "CROSS_SITE_REQUEST",
+        "Cross-site requests are not allowed",
+    )
+    assert processor.inputs == []
+    assert list(settings.work_dir.iterdir()) == []
 
 
 async def test_raw_upload_transitions_to_ready_then_downloads_and_deletes_exact_result(

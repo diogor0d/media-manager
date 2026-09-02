@@ -14,9 +14,9 @@ validation matrix below has been executed on the target host.
 ## Intended architecture
 
 ```text
-approved iOS device
+approved browser or iOS device
   -> https://<dedicated-media-hostname>
-  -> Cloudflare Access Service Auth (one token per device)
+  -> Cloudflare Access (interactive identity or one service token per device)
   -> Cloudflare Tunnel
   -> http://127.0.0.1:<host-port>   (loopback-only origin)
   -> media-manager container TCP 8080
@@ -30,7 +30,7 @@ approved iOS device
 | Image | Built from that commit, tagged with it, then recorded by immutable digest |
 | Host publication | IPv4 loopback TCP `${MEDIA_MANAGER_PORT}` to container TCP `8080` |
 | Public ingress | Dedicated HTTPS hostname through an existing host-managed Tunnel connector |
-| Edge policy | Cloudflare Access `Service Auth`; dedicated token per iOS device |
+| Edge policy | Cloudflare Access interactive identity for browsers and `Service Auth` for iOS automation |
 | Origin auth | Access JWT signature, issuer, audience, expiry, and principal validation |
 | Persistence | Disposable work volume only; no user data or job state survives restart |
 | Backup | Work volume excluded by design; Git and recorded image digest are desired state |
@@ -44,9 +44,9 @@ Placement requirements for any candidate host:
   connector already trusted by your Cloudflare zone;
 - sufficient CPU/RAM headroom for a 2-CPU / 2 GiB conversion workload measured
   against existing services;
-- a writable location for the work volume with real free-space headroom — a
-  quota-backed path is strongly preferred because Docker named volumes have no
-  portable hard quota; and
+- a writable location for the work volume with at least 10 GiB plus operational
+  headroom — a quota-backed path is strongly preferred because Docker named
+  volumes have no portable hard quota; and
 - no conflicting listener on the chosen loopback port.
 
 ## Secrets and configuration
@@ -77,10 +77,14 @@ Do not deploy until all of these are resolved:
    documentation and Tunnel origin together.
 5. Build from a clean commit, run tests, record the image identifier, FFmpeg and
    Python package versions, and scan results. Keep the previous known-good image.
-6. Confirm the Cloudflare zone upload limit is at least 64 MiB and that request,
-   polling, and download paths do not depend on cross-origin redirects.
-7. Create a dedicated hostname, Tunnel route, Access application AUD, and
-   `Service Auth` policy. Do not add a bypass or direct public origin route.
+6. Confirm the Cloudflare zone upload limit exceeds the configured 50 MiB chunk
+   size and that upload, polling, and download paths do not use cross-origin
+   redirects. Cloudflare rejects single requests above the plan limit, so 5 GiB
+   browser uploads must use `/v1/uploads`; do not raise the chunk size casually.
+   See Cloudflare's current [request-size limits](https://developers.cloudflare.com/support/troubleshooting/http-status-codes/4xx-client-error/error-413/).
+7. Create a dedicated hostname, Tunnel route, Access application AUD, an
+   interactive browser policy, and a `Service Auth` policy. Cover `/`,
+   `/assets/*`, and `/v1/*`; do not add a bypass or direct public origin route.
 8. Create one short-lived, application-scoped service token per device and
    record owner/expiry/revocation metadata without values.
 9. Add work-volume/disk, container health/restart, CPU/memory, stuck-job, Tunnel,
@@ -129,7 +133,7 @@ These steps are a runbook, not standing authorization:
 4. Run quiet Compose validation and build the image from the recorded commit.
 5. Start only the `media-manager` project and wait for `/health/ready`.
 6. Add the host Tunnel route to the loopback origin, then configure the
-   dedicated Access application and `Service Auth` policy.
+   dedicated Access application with interactive and `Service Auth` policies.
 7. Run the full validation matrix before distributing a production Shortcut.
 8. Record actual path, commit, image digest, package versions, listener, Tunnel
    route, Access policy type, resource baseline, and remaining gaps wherever you
@@ -148,6 +152,7 @@ In-flight and retained jobs are disposable and will be lost on every restart.
 | Local origin | Host request to the loopback `/health/ready` returns `200` |
 | Edge denial | External request without Access credentials is denied before media reaches the origin |
 | Edge allow | Dedicated test token can read capabilities, convert a synthetic fixture, poll, preview, download, and delete |
+| Browser flow | Interactive Access login loads the authenticated UI and assets; drop, options, upload, status, download, and discard work without cross-origin requests |
 | Origin JWT | Missing/invalid/wrong-audience assertions fail when testing the origin through an approved isolated path |
 | Isolation | A second principal receives `404` for the first principal's job |
 | Exposure | No wildcard, LAN, VPN, router, or IPv6 listener exists for the published loopback port |

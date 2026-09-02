@@ -1,8 +1,8 @@
 <div align="center">
 
-# Media Manager
+<img src="src/media_manager/web/logo.svg" alt="Media Manager" width="330">
 
-**A self-hosted media conversion API, built for the iOS Share Sheet**
+**A fast, self-hosted media converter for the web and iOS Share Sheet**
 
 Upload once · see the exact result size · download only if you want it
 
@@ -18,7 +18,7 @@ Upload once · see the exact result size · download only if you want it
 
 ---
 
-Media Manager turns a Share Sheet tap into a safe, bounded conversion job on your own server.
+Media Manager turns a browser drop or Share Sheet tap into a safe, bounded conversion job on your own server.
 Media is treated as hostile input end to end: uploads are streamed to isolated job directories,
 inspected by content rather than filename, converted through a fixed allowlisted FFmpeg surface,
 and re-probed before they can be downloaded. Every result expires automatically.
@@ -31,6 +31,7 @@ and re-probed before they can be downloaded. Every result expires automatically.
 ## Highlights
 
 - **Preview before download** — the client sees the *exact* output byte count and decides whether to fetch it; nothing downloads by surprise.
+- **Fast web workflow** — drag in one file, get immediate local format detection and relevant presets, upload once, then keep or discard the exact server result.
 - **Closed preset surface** — three quality levels, six resolution caps, keep/drop audio. No codec names, filter strings, bitrates, or arbitrary FFmpeg flags are ever accepted from clients.
 - **Content-based input handling** — MIME type, extension, and original filename never select a parser. Inputs are demuxed through an explicit format allowlist with protocol whitelisting locked to `file`.
 - **Hard resource ceilings** — upload/output byte caps, wall-clock timeouts per media class, dimension/duration/FPS/pixel/stream limits, one conversion at a time, disk-space admission control.
@@ -41,7 +42,7 @@ and re-probed before they can be downloaded. Every result expires automatically.
 
 ```mermaid
 flowchart LR
-    iphone["iPhone<br/>Share Sheet"] -- "CF-Access headers" --> access["Cloudflare<br/>Access"]
+    clients["Browser drop<br/>or iPhone Share Sheet"] -- "Access session / headers" --> access["Cloudflare<br/>Access"]
     access --> tunnel["Cloudflare<br/>Tunnel"]
     tunnel -- "loopback origin" --> api["FastAPI<br/>streaming upload + queue"]
     api -- "one at a time" --> ffmpeg["FFmpeg worker<br/>fixed argv"]
@@ -73,7 +74,10 @@ pinned image. HEIC/HEIF, AVIF, APNG, animated WebP, exotic color profiles, and c
 ## The lifecycle
 
 ```
-POST /v1/jobs          →  202  { id, state, status_url }        # one raw file body
+POST /v1/uploads       →  201  { id, offset, chunk_size }       # authenticated session
+PATCH /v1/uploads/{id} →  200  { offset }                       # ordered raw chunks
+POST /v1/uploads/{id}/complete → 202                            # queue exact upload
+POST /v1/jobs          →  202  { id, state, status_url }        # small one-request clients
 GET  /v1/jobs/{id}     →  queued → processing → ready|failed   # poll
 GET  /v1/jobs/{id}/content                                    # only after you choose to
 DELETE /v1/jobs/{id}                                          # or let it expire
@@ -126,7 +130,8 @@ Every failure uses `{"error": {"code": "...", "message": "..."}}`. Codes are sta
 
 | Area | Codes |
 | --- | --- |
-| Upload | `INPUT_TOO_LARGE`, `EMPTY_INPUT`, `UPLOAD_TIMEOUT`, `RAW_FILE_REQUIRED`, `UNSUPPORTED_ENCODING`, `INVALID_CONTENT_LENGTH`, `INSUFFICIENT_STORAGE` |
+| Browser security | `CROSS_SITE_REQUEST` |
+| Upload | `INPUT_TOO_LARGE`, `CHUNK_TOO_LARGE`, `EMPTY_INPUT`, `UPLOAD_TIMEOUT`, `UPLOAD_HEADER_REQUIRED`, `INVALID_UPLOAD_HEADER`, `UPLOAD_OFFSET_MISMATCH`, `UPLOAD_INCOMPLETE`, `UPLOAD_ALREADY_COMPLETED`, `CONTENT_LENGTH_MISMATCH`, `RAW_FILE_REQUIRED`, `UNSUPPORTED_ENCODING`, `INVALID_CONTENT_LENGTH`, `INSUFFICIENT_STORAGE` |
 | Options | `INVALID_OPTIONS` |
 | Capacity | `QUEUE_FULL` (with `Retry-After`) |
 | Authentication | `ACCESS_TOKEN_REQUIRED`, `INVALID_ACCESS_TOKEN` |
@@ -148,25 +153,30 @@ Raw FFmpeg output is never returned to clients.
 
 | Resource | Default limit |
 | --- | ---: |
-| Upload / output size | 64 MiB / 128 MiB |
-| Live jobs (incl. retained results) | 4 |
+| Upload / output size | 5 GiB / 5 GiB |
+| Authenticated chunk size | 50 MiB |
+| Live jobs (incl. retained results) | 1 |
 | Concurrent conversions | 1 |
 | Upload wall time | 5 minutes |
 | Audio/video duration | 10 minutes |
 | GIF duration / input pixels | 15 s / 4 MP |
 | Visual dimensions | 50 MP total · 16,384 px per axis |
 | Result retention | 15 minutes |
+| Incomplete upload retention | 2 hours since the last chunk |
 
 ## Authentication
 
-Clients present a Cloudflare Access **service token** (`CF-Access-Client-Id` /
-`CF-Access-Client-Secret`) on every request. Cloudflare authenticates the pair at the edge;
+Browser users authenticate through an interactive Cloudflare Access policy. Automation clients
+present a **service token** (`CF-Access-Client-Id` / `CF-Access-Client-Secret`) on every request.
+Cloudflare authenticates either identity at the edge;
 the API then independently verifies the injected `Cf-Access-Jwt-Assertion` before any work
 happens. Jobs belong to their principal — another principal gets the same `404` as a missing job.
 
 The server stores **no secrets**: only non-secret Access metadata (issuer, audience, public
-origin). Tokens live solely on authorized devices — never in `.env`, Git, logs, or an exported
-Shortcut. Use one dedicated short-lived token per device under a `Service Auth` policy.
+origin). Service tokens live solely on authorized devices — never in `.env`, Git, logs, the web
+frontend, or an exported Shortcut. Use one dedicated short-lived token per device under a
+`Service Auth` policy, and cover the web root and `/assets/*` with the same Access application as
+`/v1/*`.
 
 ## Getting started
 
@@ -182,6 +192,10 @@ uv run uvicorn media_manager.main:app --host 127.0.0.1 --port 8080
 
 What it does: starts the API on loopback with authentication disabled for local testing only —
 never use this mode beyond your own machine.
+
+Open `http://127.0.0.1:8080` for the web interface. It uses no build step, external assets,
+trackers, or browser storage. File type and preview metadata are detected locally for speed;
+FFmpeg still verifies the uploaded contents before producing any result.
 
 **Checks:**
 
@@ -235,7 +249,7 @@ image.
 
 ```text
 media-manager/
-├── src/media_manager/     # FastAPI app, jobs, processor, auth, config
+├── src/media_manager/     # FastAPI app, conversion engine, auth, and zero-build web UI
 ├── tests/                 # API, auth, and real-FFmpeg integration suites
 ├── shortcuts/             # Credential-free native Shortcut spec + release gate
 ├── docs/                  # Security model and deployment preparation
