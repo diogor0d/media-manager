@@ -496,21 +496,88 @@ async def test_web_interface_and_assets_are_served_with_browser_security_headers
                 "/assets/app.css",
                 "/assets/app.js",
                 "/assets/logo.svg",
+                "/assets/icon-192.png",
+                "/assets/icon-512.png",
+                "/assets/apple-touch-icon.png",
                 "/favicon.svg",
+                "/manifest.webmanifest",
+                "/sw.js",
             )
         }
         schema = await client.get("/openapi.json")
+        capabilities = await client.get("/v1/capabilities")
 
     assert "Drop one media file" in responses["/"].text
+    assert 'rel="manifest" href="/manifest.webmanifest"' in responses["/"].text
+    assert 'rel="apple-touch-icon"' in responses["/"].text
+    assert 'apple-mobile-web-app-capable" content="yes"' in responses["/"].text
     assert "--aperture" in responses["/assets/app.css"].text
+    assert "color-scheme: dark" in responses["/assets/app.css"].text
     assert '"use strict"' in responses["/assets/app.js"].text
+    assert 'navigator.serviceWorker.register("/sw.js"' in responses["/assets/app.js"].text
+    assert "apiJson(createdResponse)" in responses["/assets/app.js"].text
+    assert (
+        'if (!state.capabilities) return window.location.reload()'
+        in responses["/assets/app.js"].text
+    )
+    assert '$("#file-input").disabled = !available' in responses["/assets/app.js"].text
+    assert 'state.resumeAction = "upload"' in responses["/assets/app.js"].text
+    assert 'state.resumeAction = "poll"' in responses["/assets/app.js"].text
+    assert 'download.setAttribute("aria-disabled"' in responses["/assets/app.js"].text
     assert "Media Manager" in responses["/assets/logo.svg"].text
     assert responses["/favicon.svg"].headers["content-type"] == "image/svg+xml"
+    manifest = responses["/manifest.webmanifest"]
+    assert manifest.headers["content-type"] == "application/manifest+json"
+    assert manifest.headers["cache-control"] == "no-cache"
+    assert manifest.json() == {
+        "id": "/",
+        "name": "Media Manager Converter",
+        "short_name": "Converter",
+        "description": "Private, disposable media conversion.",
+        "start_url": "/",
+        "scope": "/",
+        "display": "standalone",
+        "orientation": "any",
+        "background_color": "#0a0f12",
+        "theme_color": "#0a0f12",
+        "icons": [
+            {
+                "src": "/assets/icon-192.png",
+                "sizes": "192x192",
+                "type": "image/png",
+                "purpose": "any",
+            },
+            {
+                "src": "/assets/icon-512.png",
+                "sizes": "512x512",
+                "type": "image/png",
+                "purpose": "any maskable",
+            },
+        ],
+    }
+    worker = responses["/sw.js"]
+    assert worker.headers["cache-control"] == "no-cache"
+    assert worker.headers["service-worker-allowed"] == "/"
+    assert 'url.pathname.startsWith("/v1/")' in worker.text
+    assert 'request.mode === "navigate" && url.pathname === "/"' in worker.text
+    assert '["/assets/app.js?v=pwa1", "text/javascript"]' in worker.text
+    assert "cacheShell().then(() => self.skipWaiting())" in worker.text
+    assert ").then(() => self.clients.claim())" in worker.text
+    assert "Invalid application shell response" in worker.text
+    for path in (
+        "/assets/icon-192.png",
+        "/assets/icon-512.png",
+        "/assets/apple-touch-icon.png",
+    ):
+        assert responses[path].headers["content-type"] == "image/png"
+        assert responses[path].content.startswith(b"\x89PNG\r\n\x1a\n")
     for response in responses.values():
         assert response.status_code == 200
         assert response.headers["x-content-type-options"] == "nosniff"
         assert response.headers["x-frame-options"] == "DENY"
         assert "default-src 'none'" in response.headers["content-security-policy"]
+        assert "manifest-src 'self'" in response.headers["content-security-policy"]
+    assert capabilities.headers["cache-control"] == "private, no-store"
     assert schema.status_code == 200
     assert schema.json()["info"]["title"] == "Media Manager API"
 

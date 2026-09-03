@@ -2,20 +2,26 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="theme-color" content="#e8eeec">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#0a0f12">
   <meta name="description" content="Fast, private media conversion on your own server.">
+  <meta name="format-detection" content="telephone=no">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Converter">
   <title>Media Manager</title>
   <link rel="icon" href="/favicon.svg" type="image/svg+xml">
-  <link rel="stylesheet" href="/assets/app.css">
-  <script src="/assets/app.js" defer></script>
+  <link rel="apple-touch-icon" href="/assets/apple-touch-icon.png">
+  <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="stylesheet" href="/assets/app.css?v=pwa1">
+  <script src="/assets/app.js?v=pwa1" defer></script>
 </head>
 <body>
   <header class="masthead">
     <a class="brand" href="/" aria-label="Media Manager home">
       <img src="/assets/logo.svg" alt="Media Manager" width="248" height="48">
     </a>
-    <p class="service-note"><span aria-hidden="true"></span>Private conversion bench</p>
+    <p id="connection-status" class="service-note"><span aria-hidden="true"></span>Private conversion bench</p>
   </header>
 
   <main>
@@ -27,9 +33,9 @@
 
     <section class="bench" aria-label="Media conversion">
       <div id="drop-zone" class="drop-zone" tabindex="0" role="button" aria-controls="file-input">
-        <input id="file-input" type="file" hidden>
+        <input id="file-input" type="file" accept="image/*,video/*,audio/*" hidden>
         <div class="drop-mark" aria-hidden="true"><span></span><i></i></div>
-        <div>
+        <div class="drop-prompt">
           <p class="drop-title">Drop one media file</p>
           <p class="drop-copy">or <span>choose from this device</span></p>
         </div>
@@ -121,7 +127,8 @@
 
   <footer>
     <p>Files are processed as disposable jobs and removed automatically.</p>
-    <p>No trackers · No external assets · No browser storage</p>
+    <p>No trackers · no media stored in this browser</p>
+    <p id="install-hint" class="install-hint" hidden>Install: Share → Add to Home Screen</p>
   </footer>
 </body>
 </html>

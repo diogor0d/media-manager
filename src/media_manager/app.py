@@ -93,7 +93,7 @@ def create_app(
         response.headers.setdefault(
             "Content-Security-Policy",
             "default-src 'none'; script-src 'self'; style-src 'self'; "
-            "img-src 'self' blob:; media-src blob:; connect-src 'self'; "
+            "img-src 'self' blob:; media-src blob:; connect-src 'self'; manifest-src 'self'; "
             "base-uri 'none'; form-action 'none'; frame-ancestors 'none'; object-src 'none'",
         )
         response.headers.setdefault("Referrer-Policy", "no-referrer")
@@ -103,6 +103,8 @@ def create_app(
         )
         response.headers.setdefault("X-Content-Type-Options", "nosniff")
         response.headers.setdefault("X-Frame-Options", "DENY")
+        if request.url.path.startswith("/v1/"):
+            response.headers.setdefault("Cache-Control", "private, no-store")
         return response
 
     @app.exception_handler(ApiError)
@@ -153,6 +155,32 @@ def create_app(
     @app.get("/favicon.svg", include_in_schema=False)
     async def web_favicon(_principal: PrincipalDependency) -> FileResponse:
         return _web_file("mark.svg", "image/svg+xml")
+
+    @app.get("/manifest.webmanifest", include_in_schema=False)
+    async def web_manifest(_principal: PrincipalDependency) -> FileResponse:
+        return _web_file(
+            "manifest.webmanifest",
+            "application/manifest+json",
+            cache_control="no-cache",
+        )
+
+    @app.get("/sw.js", include_in_schema=False)
+    async def service_worker(_principal: PrincipalDependency) -> FileResponse:
+        response = _web_file("sw.js", "text/javascript", cache_control="no-cache")
+        response.headers["Service-Worker-Allowed"] = "/"
+        return response
+
+    @app.get("/assets/icon-192.png", include_in_schema=False)
+    async def web_icon_small(_principal: PrincipalDependency) -> FileResponse:
+        return _web_file("icon-192.png", "image/png")
+
+    @app.get("/assets/icon-512.png", include_in_schema=False)
+    async def web_icon_large(_principal: PrincipalDependency) -> FileResponse:
+        return _web_file("icon-512.png", "image/png")
+
+    @app.get("/assets/apple-touch-icon.png", include_in_schema=False)
+    async def apple_touch_icon(_principal: PrincipalDependency) -> FileResponse:
+        return _web_file("apple-touch-icon.png", "image/png")
 
     @app.get("/openapi.json", include_in_schema=False)
     async def openapi_schema(_principal: PrincipalDependency) -> JSONResponse:
