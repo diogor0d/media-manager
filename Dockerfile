@@ -2,7 +2,7 @@
 
 FROM ghcr.io/astral-sh/uv:0.12.3@sha256:2d890623d310b57771ce840f0da5eed5fc6d657da05ffaa45d82797b53fa3abc AS uv
 
-FROM python:3.12-slim-bookworm@sha256:0f5b26b9518d002b6173fd61daad821fa340635ebfec5bba471013f9ca114579
+FROM python:3.12-alpine3.24@sha256:b64631e04e4920160c50fbe8d8df828f7f35f06f425cb44aa09bca53e708a35a
 
 ARG SOURCE_REVISION=unknown
 
@@ -19,9 +19,7 @@ ENV PYTHONUNBUFFERED=1 \
 
 COPY --from=uv /uv /uvx /bin/
 
-RUN apt-get update \
-    && DEBIAN_FRONTEND=noninteractive apt-get install --yes --no-install-recommends ca-certificates ffmpeg \
-    && rm -rf /var/lib/apt/lists/*
+RUN apk add --no-cache ca-certificates ffmpeg
 
 WORKDIR /app
 
@@ -30,7 +28,7 @@ RUN uv sync --frozen --no-dev --no-install-project
 
 COPY src ./src
 RUN uv sync --frozen --no-dev --no-editable \
-    && useradd --uid 10001 --create-home --home-dir /home/media --shell /usr/sbin/nologin media \
+    && adduser -D -u 10001 -h /home/media -s /sbin/nologin media \
     && mkdir --mode=0700 /work \
     && chown 10001:10001 /work
 

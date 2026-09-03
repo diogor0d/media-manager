@@ -47,7 +47,7 @@ flowchart LR
     tunnel -- "loopback origin" --> api["FastAPI<br/>streaming upload + queue"]
     api -- "one at a time" --> ffmpeg["FFmpeg worker<br/>fixed argv"]
     ffmpeg -- "re-probe + validate" --> ready["Exact size<br/>ready for download"]
-    api --- work[("Disposable<br/>work volume")]
+    api --- work[("Disposable host<br/>work directory")]
 ```
 
 The public path ends at a loopback listener; nothing else is published to the host.

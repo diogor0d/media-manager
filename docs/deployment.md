@@ -20,7 +20,7 @@ approved browser or iOS device
   -> Cloudflare Tunnel
   -> http://127.0.0.1:<host-port>   (loopback-only origin)
   -> media-manager container TCP 8080
-  -> disposable media-manager work volume
+  -> disposable host work directory
 ```
 
 | Item | Intended value |
@@ -32,8 +32,8 @@ approved browser or iOS device
 | Public ingress | Dedicated HTTPS hostname through an existing host-managed Tunnel connector |
 | Edge policy | Cloudflare Access interactive identity for browsers and `Service Auth` for iOS automation |
 | Origin auth | Access JWT signature, issuer, audience, expiry, and principal validation |
-| Persistence | Disposable work volume only; no user data or job state survives restart |
-| Backup | Work volume excluded by design; Git and recorded image digest are desired state |
+| Persistence | Disposable host work directory only; no user data or job state survives restart |
+| Backup | Work directory excluded by design; Git and recorded image digest are desired state |
 | Resources | Initial ceiling: 2 CPUs, 2 GiB RAM/no extra swap, 128 PIDs |
 | Logs | Docker local driver, 10 MiB x 3; no access log or media/credential content |
 | Health | Local unauthenticated `/health/ready`; external synthetic check remains Access-authenticated |
@@ -44,9 +44,9 @@ Placement requirements for any candidate host:
   connector already trusted by your Cloudflare zone;
 - sufficient CPU/RAM headroom for a 2-CPU / 2 GiB conversion workload measured
   against existing services;
-- a writable location for the work volume with at least 10 GiB plus operational
-  headroom — a quota-backed path is strongly preferred because Docker named
-  volumes have no portable hard quota; and
+- a pre-created host work directory owned by UID/GID `10001`, mode `0700`, with
+  at least 10 GiB plus operational headroom; a quota-backed path is strongly
+  preferred; and
 - no conflicting listener on the chosen loopback port.
 
 ## Secrets and configuration
@@ -54,6 +54,7 @@ Placement requirements for any candidate host:
 The server receives only non-secret Access metadata:
 
 - `MEDIA_MANAGER_PUBLIC_BASE_URL`;
+- `MEDIA_MANAGER_WORK_DIR_HOST`;
 - `MEDIA_MANAGER_CF_ISSUER`;
 - `MEDIA_MANAGER_CF_AUDIENCE`.
 
@@ -128,14 +129,16 @@ These steps are a runbook, not standing authorization:
    service-scoped rollback state.
 2. Place a clean checkout at the approved server path and check out the reviewed
    commit without overwriting server-local changes.
-3. Create the real `.env` from the variable names in `.env.example`, set its
+3. Pre-create `MEDIA_MANAGER_WORK_DIR_HOST` as UID/GID `10001`, mode `0700`,
+   and verify its capacity; do not let Compose create it as root.
+4. Create the real `.env` from the variable names in `.env.example`, set its
    owner-only mode, and use a commit-tagged `MEDIA_MANAGER_IMAGE`.
-4. Run quiet Compose validation and build the image from the recorded commit.
-5. Start only the `media-manager` project and wait for `/health/ready`.
-6. Add the host Tunnel route to the loopback origin, then configure the
-   dedicated Access application with interactive and `Service Auth` policies.
-7. Run the full validation matrix before distributing a production Shortcut.
-8. Record actual path, commit, image digest, package versions, listener, Tunnel
+5. Run quiet Compose validation and build the image from the recorded commit.
+6. Start only the `media-manager` project and wait for `/health/ready`.
+7. Configure the dedicated Access application with interactive and `Service
+   Auth` policies, then add the host Tunnel route to the loopback origin.
+8. Run the full validation matrix before distributing a production Shortcut.
+9. Record actual path, commit, image digest, package versions, listener, Tunnel
    route, Access policy type, resource baseline, and remaining gaps wherever you
    track infrastructure state.
 
@@ -146,7 +149,7 @@ In-flight and retained jobs are disposable and will be lost on every restart.
 
 | Area | Required result |
 | --- | --- |
-| Configuration | Quiet Compose validation succeeds; only `api`, its project network, and disposable work volume are present |
+| Configuration | Quiet Compose validation succeeds; only `api`, its project network, and the reviewed work-directory bind are present |
 | Runtime | Container stays healthy without restart loops; FFmpeg capability startup check passes |
 | Artifact | Running image digest and source revision match the reviewed records |
 | Local origin | Host request to the loopback `/health/ready` returns `200` |
@@ -183,8 +186,9 @@ The service has no migration or authoritative runtime data. Rollback is:
    previous state or remove the new route through an authorized Cloudflare
    change.
 
-Do not use `docker compose down -v` for rollback. The work volume is disposable,
-but deletion should be a separate explicit retention/decommission decision.
+Do not delete the host work directory during rollback. Its contents are
+disposable, but deletion should be a separate explicit retention/decommission
+decision.
 
 ## Operations and decommissioning
 
@@ -195,6 +199,6 @@ and cryptography security updates.
 
 For decommissioning, first stop distributing the Shortcut, remove the Access
 application/Tunnel route/DNS in the approved order, revoke every per-device
-token, stop the Compose project while retaining the work volume until deletion
+token, stop the Compose project while retaining the work directory until deletion
 is approved, then remove disposable files and reconcile your infrastructure
 inventory, exposure records, monitoring, and activity documentation.

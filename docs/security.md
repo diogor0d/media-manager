@@ -63,7 +63,7 @@ Outbound HTTPS remains available because Access signing keys must be refreshed.
 - `-protocol_whitelist file` blocks normal network protocols; it is not an
   egress firewall after native-code compromise. Stronger isolation would put
   conversion in a separate no-network worker sandbox or VM.
-- The named Docker work volume has no portable hard quota. One live job can
+- The host work directory may have no hard quota. One live job can
   reserve up to 5 GiB of input and 5 GiB of output, so production still needs
   at least 10 GiB plus operational headroom, capacity verification, and alerts.
 - Browser uploads are split into 50 MiB requests because Cloudflare rejects a
