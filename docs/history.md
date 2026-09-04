@@ -22,4 +22,6 @@ Recall period: September 2026
 - Verified 34 Python tests, including real FFmpeg conversion/compression, Ruff,
   JavaScript syntax, package build, and a local Docker image build at this stage.
 - Production deployment of this revision and Apple-hardware Shortcut/PWA tests
-  were not performed as part of this record.
+  were initially outside this implementation record. The code revision was
+  subsequently deployed on 2026-09-04; host evidence is maintained in the
+  private homelab operations record. Apple-hardware validation remains pending.

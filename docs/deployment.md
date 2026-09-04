@@ -2,11 +2,10 @@
 
 ## State
 
-An earlier revision (`8f2e2b9be87b98b7fc6efdeac8f7338c1d872e5e`) is deployed
-behind Cloudflare Access. The current worktree's compression endpoint, progress,
-quality scale, filename handling, PWA changes, and Shortcut contracts are local
-prepared state only. No production mutation is authorized by this document;
-repeat the validation matrix for the exact new image before deployment.
+This application repository defines deployment requirements but is not the
+authoritative record of any running host. Verify and record the exact deployed
+revision and image in the relevant operations inventory. No production mutation
+is authorized by this document; repeat the validation matrix for every image.
 
 ## Intended architecture
 

@@ -23,9 +23,9 @@ Media is treated as hostile input end to end: uploads are streamed to isolated j
 inspected by content rather than filename, converted through a fixed allowlisted FFmpeg surface,
 and re-probed before they can be downloaded. Every result expires automatically.
 
-> **Status** — The current worktree is validated locally but not deployed. An
-> earlier revision is deployed behind Cloudflare Access; the new compression,
-> progress, PWA, and Shortcut behavior still requires production and Apple-device
+> **Status** — The application is locally validated. Deployment state is tracked
+> outside this application repository; verify the running revision before making
+> runtime claims. Apple-device PWA and Shortcut behavior requires on-device
 > validation. See [deployment guide](docs/deployment.md) for the exact gates.
 
 ## Highlights
