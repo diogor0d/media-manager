@@ -46,6 +46,13 @@ class JobState(StrEnum):
     FAILED = "failed"
 
 
+class JobProgressStage(StrEnum):
+    QUEUED = "queued"
+    INSPECTING = "inspecting"
+    CONVERTING = "converting"
+    VALIDATING = "validating"
+
+
 class MediaClass(StrEnum):
     VIDEO = "video"
     IMAGE = "image"
@@ -58,6 +65,7 @@ class ConversionOptions(BaseModel):
 
     target: Target
     quality: Quality = Quality.BALANCED
+    quality_percent: int | None = Field(default=None, ge=0, le=100)
     resolution: Resolution = Resolution.SOURCE
     audio: AudioMode = AudioMode.KEEP
 
@@ -88,11 +96,17 @@ class JobError(BaseModel):
     message: str
 
 
+class JobProgress(BaseModel):
+    stage: JobProgressStage
+    percent: int | None = Field(default=None, ge=0, le=100)
+
+
 class JobView(BaseModel):
     id: str
     state: JobState
     target: Target
     quality: Quality
+    quality_percent: int = Field(ge=0, le=100)
     resolution: Resolution
     audio: AudioMode
     created_at: datetime
@@ -101,6 +115,28 @@ class JobView(BaseModel):
     input: MediaMetadata | None = None
     output: OutputMetadata | None = None
     error: JobError | None = None
+    progress: JobProgress | None = None
+
+
+class CompressionMetadata(BaseModel):
+    target_bytes: int = Field(gt=0)
+    aim_bytes: int = Field(gt=0)
+    met_target: bool
+    attempts: int = Field(ge=1, le=5)
+    selected_target: Target
+
+
+class CompressionJobView(BaseModel):
+    id: str
+    state: JobState
+    created_at: datetime
+    expires_at: datetime | None = None
+    status_url: str
+    input: MediaMetadata | None = None
+    output: OutputMetadata | None = None
+    error: JobError | None = None
+    progress: JobProgress | None = None
+    compression: CompressionMetadata | None = None
 
 
 class ErrorBody(BaseModel):
@@ -117,6 +153,22 @@ class CapabilityOption(BaseModel):
     label: str
 
 
+class QualityMetric(BaseModel):
+    label: str
+    economy: int
+    balanced: int
+    high: int
+    unit: str
+    higher_is_better: bool = True
+
+
+class QualityScale(BaseModel):
+    minimum: int = 0
+    maximum: int = 100
+    step: int = 1
+    default: int = 50
+
+
 class TargetCapability(BaseModel):
     value: Target
     label: str
@@ -125,16 +177,20 @@ class TargetCapability(BaseModel):
     accepts: list[MediaClass]
     allowed_resolutions: list[Resolution]
     allowed_audio_modes: list[AudioMode]
+    quality_metrics: list[QualityMetric]
+    quality_note: str
 
 
 class Capabilities(BaseModel):
     targets: list[TargetCapability]
     qualities: list[CapabilityOption]
+    quality_scale: QualityScale
     resolutions: list[CapabilityOption]
     audio_modes: list[CapabilityOption]
     max_upload_bytes: int
     max_chunk_bytes: int
     result_ttl_seconds: int
+    compression_target_bytes: int
 
 
 class UploadView(BaseModel):

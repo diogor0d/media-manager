@@ -4,7 +4,7 @@ import asyncio
 import logging
 import shutil
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -14,15 +14,19 @@ from typing import Protocol
 from media_manager.config import Settings
 from media_manager.errors import ApiError, ProcessingError
 from media_manager.models import (
+    CompressionJobView,
+    CompressionMetadata,
     ConversionOptions,
     JobError,
+    JobProgress,
+    JobProgressStage,
     JobState,
     JobView,
     MediaMetadata,
     OutputMetadata,
     UploadView,
 )
-from media_manager.processor import ConversionCancelled, ConversionResult
+from media_manager.processor import CompressionResult, ConversionCancelled, ConversionResult
 
 logger = logging.getLogger(__name__)
 
@@ -36,14 +40,23 @@ class Processor(Protocol):
         job_dir: Path,
         options: ConversionOptions,
         cancel_event: asyncio.Event,
+        progress_callback: Callable[[JobProgressStage, int | None], Awaitable[None]] | None = None,
     ) -> ConversionResult: ...
+
+    async def compress(
+        self,
+        input_path: Path,
+        job_dir: Path,
+        cancel_event: asyncio.Event,
+        progress_callback: Callable[[JobProgressStage, int | None], Awaitable[None]] | None = None,
+    ) -> CompressionResult: ...
 
 
 @dataclass(slots=True)
 class JobRecord:
     id: str
     principal_id: str
-    options: ConversionOptions
+    options: ConversionOptions | None
     directory: Path
     input_path: Path
     created_at: datetime
@@ -54,6 +67,10 @@ class JobRecord:
     output_metadata: OutputMetadata | None = None
     output_path: Path | None = None
     error: JobError | None = None
+    progress: JobProgress | None = None
+    source_filename: str | None = None
+    is_compression: bool = False
+    compression: CompressionMetadata | None = None
     expires_at: datetime | None = None
     cancel_event: asyncio.Event = field(default_factory=asyncio.Event)
     upload_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
@@ -114,8 +131,9 @@ class JobManager:
     async def reserve(
         self,
         principal_id: str,
-        options: ConversionOptions,
+        options: ConversionOptions | None,
         expected_input_bytes: int | None = None,
+        source_filename: str | None = None,
     ) -> JobRecord:
         async with self._lock:
             if len(self._jobs) >= self._settings.max_live_jobs:
@@ -126,7 +144,10 @@ class JobManager:
                     headers={"Retry-After": "10"},
                 )
 
-            required = self._settings.max_upload_bytes + self._settings.max_output_bytes
+            output_slots = 2 if options is None else 1
+            required = self._settings.max_upload_bytes + (
+                output_slots * self._settings.max_output_bytes
+            )
             try:
                 free_bytes = shutil.disk_usage(self._settings.work_dir).free
             except OSError as exc:
@@ -160,13 +181,29 @@ class JobManager:
                 input_path=directory / "input",
                 created_at=datetime.now(UTC),
                 expected_input_bytes=expected_input_bytes,
+                source_filename=_safe_source_name(source_filename),
                 expires_at=datetime.now(UTC)
                 + timedelta(seconds=self._settings.upload_session_ttl_seconds),
             )
             self._jobs[job_id] = job
             return job
 
-    async def enqueue(self, job_id: str, input_bytes: int) -> JobView:
+    async def reserve_compression(
+        self,
+        principal_id: str,
+        expected_input_bytes: int | None = None,
+        source_filename: str | None = None,
+    ) -> JobRecord:
+        job = await self.reserve(
+            principal_id,
+            None,
+            expected_input_bytes,
+            source_filename,
+        )
+        job.is_compression = True
+        return job
+
+    async def enqueue(self, job_id: str, input_bytes: int) -> JobView | CompressionJobView:
         async with self._lock:
             job = self._jobs.get(job_id)
             if job is None:
@@ -177,6 +214,7 @@ class JobManager:
                 raise ApiError(409, "UPLOAD_INCOMPLETE", "Upload is incomplete")
             job.input_bytes = input_bytes
             job.state = JobState.QUEUED
+            job.progress = JobProgress(stage=JobProgressStage.QUEUED)
             job.expires_at = None
             view = self._snapshot(job)
         await self._queue.put(job_id)
@@ -236,14 +274,21 @@ class JobManager:
         if job:
             await self._remove_record_directory(job)
 
-    async def get(self, job_id: str, principal_id: str) -> JobView:
+    async def get(self, job_id: str, principal_id: str) -> JobView | CompressionJobView:
         async with self._lock:
             job = self._authorized_job(job_id, principal_id)
             return self._snapshot(job)
 
-    async def download(self, job_id: str, principal_id: str) -> tuple[Path, str, str]:
+    async def download(
+        self,
+        job_id: str,
+        principal_id: str,
+        compression: bool | None = None,
+    ) -> tuple[Path, str, str]:
         async with self._lock:
             job = self._authorized_job(job_id, principal_id)
+            if compression is not None and job.is_compression is not compression:
+                raise ApiError(404, "JOB_NOT_FOUND", "Job was not found")
             if job.state is not JobState.READY or not job.output_path or not job.output_metadata:
                 raise ApiError(409, "JOB_NOT_READY", "Converted media is not ready")
             if not job.output_path.is_file():
@@ -255,9 +300,16 @@ class JobManager:
                 job.expires_at = minimum_expiry
             return job.output_path, job.output_metadata.filename, job.output_metadata.media_type
 
-    async def delete(self, job_id: str, principal_id: str) -> None:
+    async def delete(
+        self,
+        job_id: str,
+        principal_id: str,
+        compression: bool | None = None,
+    ) -> None:
         async with self._lock:
             job = self._authorized_job(job_id, principal_id)
+            if compression is not None and job.is_compression is not compression:
+                raise ApiError(404, "JOB_NOT_FOUND", "Job was not found")
             self._jobs.pop(job_id)
             job.cancel_event.set()
 
@@ -270,12 +322,27 @@ class JobManager:
             raise ApiError(404, "JOB_NOT_FOUND", "Job was not found")
         return job
 
-    def _snapshot(self, job: JobRecord) -> JobView:
+    def _snapshot(self, job: JobRecord) -> JobView | CompressionJobView:
+        if job.is_compression:
+            return CompressionJobView(
+                id=job.id,
+                state=job.state,
+                created_at=job.created_at,
+                expires_at=job.expires_at,
+                status_url=f"{self._settings.public_base_url}/v1/compressions/{job.id}",
+                input=job.input_metadata,
+                output=job.output_metadata,
+                error=job.error,
+                progress=job.progress,
+                compression=job.compression,
+            )
+        assert job.options is not None
         return JobView(
             id=job.id,
             state=job.state,
             target=job.options.target,
             quality=job.options.quality,
+            quality_percent=_quality_percent(job.options),
             resolution=job.options.resolution,
             audio=job.options.audio,
             created_at=job.created_at,
@@ -284,6 +351,7 @@ class JobManager:
             input=job.input_metadata,
             output=job.output_metadata,
             error=job.error,
+            progress=job.progress,
         )
 
     def _upload_snapshot(self, job: JobRecord) -> UploadView:
@@ -314,14 +382,32 @@ class JobManager:
                     if job is None:
                         continue
                     job.state = JobState.PROCESSING
+                    job.progress = JobProgress(stage=JobProgressStage.INSPECTING)
 
                 try:
-                    result = await self._processor.convert(
-                        job.input_path,
-                        job.directory,
-                        job.options,
-                        job.cancel_event,
-                    )
+                    async def callback(
+                        stage: JobProgressStage,
+                        percent: int | None,
+                        record: JobRecord = job,
+                    ) -> None:
+                        await self._update_progress(record, stage, percent)
+
+                    if job.is_compression:
+                        result = await self._processor.compress(
+                            job.input_path,
+                            job.directory,
+                            job.cancel_event,
+                            callback,
+                        )
+                    else:
+                        assert job.options is not None
+                        result = await self._processor.convert(
+                            job.input_path,
+                            job.directory,
+                            job.options,
+                            job.cancel_event,
+                            callback,
+                        )
                 except ConversionCancelled:
                     await self._finish_cancelled(job)
                 except ProcessingError as exc:
@@ -353,16 +439,24 @@ class JobManager:
                 job.output_path = result.output_path
                 job.output_metadata = OutputMetadata(
                     bytes=result.output_bytes,
-                    filename=result.filename,
+                    filename=_output_filename(
+                        job.source_filename,
+                        result.filename,
+                        "compressed" if job.is_compression else "converted",
+                    ),
                     media_type=result.media_type,
                     download_url=(
-                        f"{self._settings.public_base_url}/v1/jobs/{job.id}/content"
+                        f"{self._settings.public_base_url}/v1/"
+                        f"{'compressions' if job.is_compression else 'jobs'}/{job.id}/content"
                     ),
                     width=result.width,
                     height=result.height,
                     duration_ms=result.duration_ms,
                 )
                 job.state = JobState.READY
+                if isinstance(result, CompressionResult):
+                    job.compression = result.compression
+                job.progress = None
                 job.expires_at = datetime.now(UTC) + timedelta(
                     seconds=self._settings.result_ttl_seconds
                 )
@@ -376,6 +470,7 @@ class JobManager:
             current = self._jobs.get(job.id)
             if current is job:
                 job.state = JobState.FAILED
+                job.progress = None
                 job.error = JobError(code=code, message=message)
                 job.expires_at = datetime.now(UTC) + timedelta(
                     seconds=self._settings.result_ttl_seconds
@@ -390,6 +485,25 @@ class JobManager:
         async with self._lock:
             self._jobs.pop(job.id, None)
         await self._remove_directory(job.directory)
+
+    async def _update_progress(
+        self,
+        job: JobRecord,
+        stage: JobProgressStage,
+        percent: int | None,
+    ) -> None:
+        async with self._lock:
+            if self._jobs.get(job.id) is not job or job.state is not JobState.PROCESSING:
+                return
+            if (
+                stage is JobProgressStage.CONVERTING
+                and job.progress is not None
+                and job.progress.stage is JobProgressStage.CONVERTING
+                and job.progress.percent is not None
+                and percent is not None
+            ):
+                percent = max(job.progress.percent, percent)
+            job.progress = JobProgress(stage=stage, percent=percent)
 
     async def _janitor(self) -> None:
         while True:
@@ -439,3 +553,25 @@ class JobManager:
     @staticmethod
     async def _remove_file(path: Path) -> None:
         await asyncio.to_thread(path.unlink, missing_ok=True)
+
+
+def _quality_percent(options: ConversionOptions) -> int:
+    if options.quality_percent is not None:
+        return options.quality_percent
+    return {"economy": 0, "balanced": 50, "high": 100}[options.quality.value]
+
+
+def _safe_source_name(value: str | None) -> str | None:
+    if not value:
+        return None
+    name = value.replace("\\", "/").rsplit("/", maxsplit=1)[-1]
+    name = "".join(character for character in name if ord(character) >= 32).strip(" .")
+    return name[:180] or None
+
+
+def _output_filename(source: str | None, fallback: str, suffix: str) -> str:
+    extension = fallback.rsplit(".", maxsplit=1)[-1]
+    if not source:
+        return fallback
+    stem = source.rsplit(".", maxsplit=1)[0] if "." in source else source
+    return f"{stem.rstrip(' .') or 'media'}-{suffix}.{extension}"

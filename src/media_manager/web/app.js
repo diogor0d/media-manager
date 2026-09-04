@@ -1,7 +1,8 @@
 "use strict";
 
 const $ = (selector) => document.querySelector(selector);
-const state = { capabilities: null, file: null, mediaClass: null, objectUrl: null, jobId: null, upload: null, resumeAction: null, xhr: null, pollTimer: null, expiryTimer: null, cancelled: false, reloadOnError: false };
+const RECOVERY_KEY = "media-manager-active-job";
+const state = { capabilities: null, file: null, mediaClass: null, objectUrl: null, jobId: null, result: null, upload: null, resumeAction: null, xhr: null, pollTimer: null, expiryTimer: null, cancelled: false, reloadOnError: false, waitingWorker: null, updateRequested: false };
 
 const extensionGroups = {
   image: new Set(["jpg", "jpeg", "png", "webp", "bmp", "tif", "tiff"]),
@@ -25,7 +26,8 @@ async function init() {
     state.capabilities = await apiJson(response);
     updateConnectionStatus();
     $("#limit-copy").textContent = `Up to ${formatBytes(state.capabilities.max_upload_bytes)} · results expire after ${formatDuration(state.capabilities.result_ttl_seconds)}`;
-    renderQualityOptions();
+    configureQualitySlider();
+    if (await restoreJob()) return;
     announce("Converter ready");
   } catch (error) {
     if (error.reauthenticate) showSessionExpired();
@@ -42,19 +44,54 @@ function bindEvents() {
   ["dragenter", "dragover"].forEach((name) => drop.addEventListener(name, (event) => { event.preventDefault(); if (converterAvailable()) drop.classList.add("is-dragging"); }));
   ["dragleave", "drop"].forEach((name) => drop.addEventListener(name, (event) => { event.preventDefault(); drop.classList.remove("is-dragging"); }));
   drop.addEventListener("drop", (event) => converterAvailable() && event.dataTransfer.files[0] && selectFile(event.dataTransfer.files[0]));
-  $("#replace-file").addEventListener("click", () => converterAvailable() && input.click());
+  $("#replace-file").addEventListener("click", () => { if (converterAvailable()) { input.value = ""; input.click(); } });
   $("#conversion-form").addEventListener("submit", startConversion);
   $("#target-options").addEventListener("change", updateTargetOptions);
+  $("#audio-options").addEventListener("change", updateQualityDetails);
+  $("#quality-slider").addEventListener("input", updateQualityDetails);
   $("#cancel-button").addEventListener("click", cancelJob);
   $("#discard-button").addEventListener("click", reset);
+  $("#share-button").addEventListener("click", shareResult);
   $("#download-button").addEventListener("click", (event) => { if (!navigator.onLine) { event.preventDefault(); announce("Reconnect before downloading the result."); } });
   $("#try-again-button").addEventListener("click", () => state.capabilities && !state.reloadOnError ? reset() : window.location.reload());
+  $("#update-button").addEventListener("click", activatePwaUpdate);
   window.addEventListener("online", resumeAfterReconnect);
   window.addEventListener("offline", updateConnectionStatus);
 }
 
-function registerPwa() {
-  if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js", { scope: "/" }).catch(() => {});
+async function registerPwa() {
+  if (!("serviceWorker" in navigator)) return;
+  try {
+    const registration = await navigator.serviceWorker.register("/sw.js", { scope: "/" });
+    if (registration.waiting) offerPwaUpdate(registration.waiting);
+    registration.addEventListener("updatefound", () => {
+      const worker = registration.installing;
+      worker?.addEventListener("statechange", () => {
+        if (worker.state === "installed" && navigator.serviceWorker.controller) offerPwaUpdate(worker);
+      });
+    });
+    navigator.serviceWorker.addEventListener("controllerchange", () => { if (state.updateRequested) window.location.reload(); });
+  } catch (_) { /* The online converter still works without installation. */ }
+}
+
+function offerPwaUpdate(worker) { state.waitingWorker = worker; $("#update-notice").hidden = false; }
+function activatePwaUpdate() {
+  if (!state.waitingWorker) return;
+  if (!$("#progress-view").hidden) {
+    state.updateRequested = true;
+    $("#update-button").textContent = "Waiting for conversion";
+    $("#update-button").disabled = true;
+    announce("The update will install after this conversion finishes.");
+    return;
+  }
+  state.updateRequested = true;
+  state.waitingWorker.postMessage("SKIP_WAITING");
+}
+function finishDeferredUpdate() {
+  if (!state.updateRequested || !state.waitingWorker) return;
+  $("#update-button").disabled = false;
+  $("#update-button").textContent = "Updating…";
+  activatePwaUpdate();
 }
 
 function showInstallHint() {
@@ -78,6 +115,7 @@ function updateConnectionStatus() {
   download.classList.toggle("is-disabled", !navigator.onLine);
   download.setAttribute("aria-disabled", String(!navigator.onLine));
   download.tabIndex = navigator.onLine ? 0 : -1;
+  $("#share-button").disabled = !navigator.onLine;
   announce(navigator.onLine ? "Connection restored." : "Offline. Conversion is paused.");
 }
 
@@ -169,14 +207,35 @@ function renderTargets(mediaClass) {
   updateTargetOptions();
 }
 
-function renderQualityOptions() {
-  const container = $("#quality-options");
-  state.capabilities.qualities.forEach((quality) => {
-    const wrapper = document.createElement("div"); wrapper.className = "segment-option";
-    const input = document.createElement("input"); input.type = "radio"; input.name = "quality"; input.id = `quality-${quality.value}`; input.value = quality.value; input.checked = quality.value === "balanced";
-    const label = document.createElement("label"); label.htmlFor = input.id; label.textContent = quality.label;
-    wrapper.append(input, label); container.append(wrapper);
-  });
+function configureQualitySlider() {
+  const scale = state.capabilities.quality_scale;
+  const slider = $("#quality-slider");
+  slider.min = scale.minimum; slider.max = scale.maximum; slider.step = scale.step; slider.value = scale.default;
+}
+
+async function restoreJob() {
+  const jobId = sessionStorage.getItem(RECOVERY_KEY);
+  if (!jobId) return false;
+  state.jobId = jobId;
+  try {
+    const response = await fetch(`/v1/jobs/${encodeURIComponent(jobId)}`, { headers: { Accept: "application/json" }, cache: "no-store" });
+    const job = await apiJson(response);
+    if (job.state === "ready") showResult(job);
+    else if (job.state === "failed") { clearRecovery(); showError("This conversion stopped.", job.error?.message || "The media could not be converted."); }
+    else {
+      showView("#progress-view");
+      $("#progress-view").classList.add("is-processing");
+      renderJobProgress(job);
+      pollJob();
+    }
+    announce("Recovered the active conversion.");
+    return true;
+  } catch (error) {
+    clearRecovery();
+    state.jobId = null;
+    if (error.reauthenticate) throw error;
+    return false;
+  }
 }
 
 function updateTargetOptions() {
@@ -200,6 +259,29 @@ function updateTargetOptions() {
   });
   $("#audio-field").hidden = target.allowed_audio_modes.length === 1;
   $("#convert-extension").textContent = `.${target.extension}`;
+  updateQualityDetails();
+}
+
+function updateQualityDetails() {
+  const slider = $("#quality-slider");
+  const percent = Number(slider.value);
+  $("#quality-value").textContent = `${percent}%`;
+  const targetValue = document.querySelector('input[name="target"]:checked')?.value;
+  if (!targetValue) return;
+  const target = targetFor(targetValue);
+  const dropAudio = document.querySelector('input[name="audio"]:checked')?.value === "drop";
+  const details = target.quality_metrics
+    .filter((metric) => !(dropAudio && metric.label.toLowerCase().includes("audio")))
+    .map((metric) => `${metric.label} ${interpolateMetric(metric, percent)} ${metric.unit}`);
+  $("#quality-detail").textContent = `${percent}% · ${details.join(" · ")}`;
+  const boundedNote = target.value === "image-png" ? "" : " 100% is the highest supported setting, not necessarily lossless.";
+  $("#quality-note").textContent = `${target.quality_note}${boundedNote}`;
+  slider.setAttribute("aria-valuetext", `${percent}%, ${details.join(", ")}`);
+}
+
+function interpolateMetric(metric, percent) {
+  if (percent <= 50) return Math.round(metric.economy + (metric.balanced - metric.economy) * percent / 50);
+  return Math.round(metric.balanced + (metric.high - metric.balanced) * (percent - 50) / 50);
 }
 
 async function startConversion(event) {
@@ -207,18 +289,19 @@ async function startConversion(event) {
   if (!navigator.onLine) return showError("You’re offline.", "Reconnect before starting the upload.", "Try again");
   const targetValue = document.querySelector('input[name="target"]:checked').value;
   const target = state.capabilities.targets.find((item) => item.value === targetValue);
-  const quality = document.querySelector('input[name="quality"]:checked').value;
+  const qualityPercent = $("#quality-slider").value;
   const resolution = $("#resolution-select").value || "source";
   const audio = document.querySelector('input[name="audio"]:checked')?.value || "keep";
-  const query = new URLSearchParams({ target: targetValue, quality, resolution, audio });
+  const query = new URLSearchParams({ target: targetValue, quality_percent: qualityPercent, resolution, audio });
   state.cancelled = false;
   showView("#progress-view");
   $("#progress-view").classList.remove("is-processing");
+  renderStage("upload", 0);
   setProgress("UPLOADING", "Sending secure chunks…", `0 of ${formatBytes(state.file.size)}`);
   try {
     const createdResponse = await fetch(`/v1/uploads?${query}`, {
       method: "POST",
-      headers: { Accept: "application/json", "Upload-Length": String(state.file.size) },
+      headers: { Accept: "application/json", "Upload-Length": String(state.file.size), "Upload-Filename": encodeURIComponent(state.file.name) },
     });
     let upload = await apiJson(createdResponse);
     state.jobId = upload.id;
@@ -248,10 +331,10 @@ async function continueUpload(target = targetFor(document.querySelector('input[n
     });
     const job = await apiJson(completedResponse);
     state.upload = null;
-    $("#upload-bar").style.width = "100%";
     $("#progress-view").classList.add("is-processing");
-    setProgress("PROCESSING", `Making .${target.extension}…`, "The server is inspecting and converting your file.");
+    renderStage("inspecting", null);
     state.jobId = job.id;
+    sessionStorage.setItem(RECOVERY_KEY, job.id);
     pollJob();
   } catch (error) {
     handleUploadError(error);
@@ -323,9 +406,13 @@ async function pollJob() {
     const response = await fetch(`/v1/jobs/${encodeURIComponent(state.jobId)}`, { headers: { Accept: "application/json" }, cache: "no-store" });
     const job = await apiJson(response);
     if (job.state === "ready") return showResult(job);
-    if (job.state === "failed") return showError("This conversion stopped.", job.error?.message || "The media could not be converted.");
-    const label = job.state === "queued" ? "Waiting for the converter…" : `Making .${targetFor(job.target).extension}…`;
-    $("#progress-title").textContent = label;
+    if (job.state === "failed") {
+      clearRecovery();
+      showError("This conversion stopped.", job.error?.message || "The media could not be converted.");
+      finishDeferredUpdate();
+      return;
+    }
+    renderJobProgress(job);
     state.pollTimer = window.setTimeout(pollJob, document.hidden ? 1800 : 700);
   } catch (error) {
     if (error.reauthenticate) showSessionExpired();
@@ -339,8 +426,50 @@ async function pollJob() {
   }
 }
 
+function renderJobProgress(job) {
+  if (job.state === "queued") return renderStage("queued", null);
+  const stage = job.progress?.stage || "inspecting";
+  renderStage(stage, job.progress?.percent ?? null, targetFor(job.target));
+}
+
+function renderStage(stage, percent, target = null) {
+  const order = ["upload", "inspecting", "converting", "validating"];
+  const active = stage === "queued" ? "inspecting" : stage;
+  const activeIndex = order.indexOf(active);
+  document.querySelectorAll("#progress-stages li").forEach((item) => {
+    const index = order.indexOf(item.dataset.stage);
+    item.classList.toggle("is-complete", index < activeIndex);
+    item.classList.toggle("is-active", index === activeIndex);
+    if (index === activeIndex) item.setAttribute("aria-current", "step");
+    else item.removeAttribute("aria-current");
+  });
+  const copy = {
+    upload: ["UPLOADING", "Sending secure chunks…", `${percent ?? 0}% transferred to the private workspace.`],
+    queued: ["QUEUED", "Waiting for the converter…", "Your upload is complete and safely queued."],
+    inspecting: ["INSPECTING", "Reading streams and limits…", "FFprobe is validating codecs, dimensions, duration, and stream layout."],
+    converting: ["CONVERTING", `Encoding ${target ? `.${target.extension}` : "output"}…`, percent == null ? "FFmpeg is converting the selected streams." : `${percent}% of the media timeline encoded.`],
+    validating: ["VERIFYING", "Checking the finished file…", "The output container, codec, streams, size, and metadata are being verified."],
+  }[stage];
+  setProgress(...copy);
+  setMeter(percent, stage === "upload" ? "Upload progress" : "Conversion progress");
+}
+
+function setMeter(percent, label) {
+  const meter = $("#upload-meter");
+  meter.setAttribute("aria-label", label);
+  meter.classList.toggle("is-indeterminate", percent == null);
+  if (percent == null) meter.removeAttribute("aria-valuenow");
+  else {
+    meter.setAttribute("aria-valuenow", String(percent));
+    $("#upload-bar").style.width = `${percent}%`;
+  }
+}
+
 function showResult(job) {
   clearTimers();
+  state.jobId = job.id;
+  state.result = job.output;
+  sessionStorage.setItem(RECOVERY_KEY, job.id);
   const input = job.input; const output = job.output; const target = targetFor(job.target);
   $("#result-input-size").textContent = formatBytes(input.bytes);
   $("#result-output-size").textContent = formatBytes(output.bytes);
@@ -351,9 +480,32 @@ function showResult(job) {
   $("#download-button").href = `/v1/jobs/${encodeURIComponent(job.id)}/content`;
   $("#download-button").setAttribute("download", output.filename);
   $("#download-extension").textContent = `.${target.extension}`;
+  $("#share-extension").textContent = `.${target.extension}`;
+  $("#share-button").hidden = !(navigator.share && window.File);
   showView("#result-view");
   updateExpiry(job.expires_at);
   announce("Conversion ready. Review the result size before downloading.");
+  finishDeferredUpdate();
+}
+
+async function shareResult() {
+  if (!navigator.onLine || !state.jobId || !state.result) return announce("Reconnect before sharing the result.");
+  const button = $("#share-button");
+  button.disabled = true;
+  button.firstChild.textContent = "Preparing… ";
+  try {
+    const response = await fetch(`/v1/jobs/${encodeURIComponent(state.jobId)}/content`);
+    if (!response.ok) throw new Error("The result could not be opened.");
+    const file = new File([await response.blob()], state.result.filename, { type: state.result.media_type });
+    if (!navigator.canShare?.({ files: [file] })) throw new Error("This result cannot be shared directly. Use Open instead.");
+    await navigator.share({ files: [file], title: state.result.filename });
+    announce("Share sheet closed. The disposable result remains available until expiry.");
+  } catch (error) {
+    if (error.name !== "AbortError") announce(error.message || "Use Open to save this result.");
+  } finally {
+    button.disabled = false;
+    button.firstChild.textContent = "Share or save ";
+  }
 }
 
 async function cancelJob() {
@@ -367,11 +519,13 @@ async function cancelJob() {
 async function reset(deleteJob = true) {
   const oldJobId = state.jobId;
   clearTimers();
-  state.jobId = null; state.file = null; state.mediaClass = null; state.upload = null; state.resumeAction = null; state.cancelled = true; state.reloadOnError = false;
+  state.jobId = null; state.result = null; state.file = null; state.mediaClass = null; state.upload = null; state.resumeAction = null; state.cancelled = true; state.reloadOnError = false;
+  clearRecovery();
   revokePreview();
   $("#file-input").value = "";
   showView("#drop-zone");
   if (deleteJob && oldJobId) { try { await fetch(`/v1/jobs/${encodeURIComponent(oldJobId)}`, { method: "DELETE" }); } catch (_) { /* Best-effort cleanup. */ } }
+  finishDeferredUpdate();
   announce("Ready for another file.");
 }
 
@@ -398,7 +552,11 @@ function showError(title, detail, action = "Choose another file", reload = false
   announce(`${title} ${detail || ""}`);
 }
 
-function showView(selector) { views.forEach((view) => { $(view).hidden = view !== selector; }); }
+function showView(selector) {
+  views.forEach((view) => { $(view).hidden = view !== selector; });
+  const focusTarget = $(selector).matches("[data-view-focus]") ? $(selector) : $(selector).querySelector("[data-view-focus]");
+  window.requestAnimationFrame(() => focusTarget?.focus({ preventScroll: false }));
+}
 function setProgress(kicker, title, detail) { $("#progress-kicker").textContent = kicker; $("#progress-title").textContent = title; $("#progress-detail").textContent = detail; }
 function setDimensions(width, height) { if (!width || !height) return; $("#file-dimensions").textContent = `${width} × ${height}`; $("#dimensions-fact").hidden = false; }
 function setDuration(seconds) { if (!Number.isFinite(seconds)) return; $("#file-duration").textContent = formatClock(seconds); $("#duration-fact").hidden = false; }
@@ -412,6 +570,7 @@ function mediaMeta(media) { const pieces = []; if (media.width && media.height) 
 function announce(message) { $("#live-status").textContent = message; }
 function revokePreview() { if (state.objectUrl) URL.revokeObjectURL(state.objectUrl); state.objectUrl = null; $("#preview")?.replaceChildren(); }
 function clearTimers() { window.clearTimeout(state.pollTimer); window.clearInterval(state.expiryTimer); state.pollTimer = null; state.expiryTimer = null; }
+function clearRecovery() { sessionStorage.removeItem(RECOVERY_KEY); }
 async function apiJson(response) {
   const contentType = response.headers.get("Content-Type") || "";
   const sameOrigin = !response.url || new URL(response.url).origin === window.location.origin;
@@ -428,7 +587,13 @@ function updateExpiry(value) {
   const tick = () => {
     const remaining = Math.max(0, Math.ceil((expires - Date.now()) / 1000));
     $("#expiry-copy").textContent = remaining ? `Disposable result · removed in ${formatClock(remaining)}` : "This result has expired and was removed.";
-    if (!remaining) { clearTimers(); $("#download-button").removeAttribute("href"); }
+    if (!remaining) {
+      clearTimers(); clearRecovery(); state.result = null;
+      const download = $("#download-button");
+      download.removeAttribute("href"); download.removeAttribute("download"); download.classList.add("is-disabled"); download.setAttribute("aria-disabled", "true"); download.tabIndex = -1; download.firstChild.textContent = "Expired ";
+      $("#share-button").disabled = true;
+      announce("The disposable result expired and was removed.");
+    }
   };
   tick(); state.expiryTimer = window.setInterval(tick, 1000);
 }

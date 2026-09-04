@@ -6,7 +6,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Annotated
-from urllib.parse import urlsplit
+from urllib.parse import unquote, urlsplit
 
 import aiofiles
 from fastapi import Depends, FastAPI, Query, Request, Response
@@ -22,23 +22,27 @@ from media_manager.models import (
     AudioMode,
     Capabilities,
     CapabilityOption,
+    CompressionJobView,
     ConversionOptions,
     ErrorBody,
     ErrorResponse,
     JobView,
     Quality,
+    QualityScale,
     Resolution,
     Target,
     UploadView,
 )
-from media_manager.processor import MediaProcessor, target_capabilities
+from media_manager.processor import COMPRESSION_TARGET_BYTES, MediaProcessor, target_capabilities
 
 PrincipalDependency = Annotated[Principal, Depends(get_principal)]
 TargetQuery = Annotated[Target, Query()]
-QualityQuery = Annotated[Quality, Query()]
+QualityQuery = Annotated[Quality | None, Query()]
+QualityPercentQuery = Annotated[int | None, Query(ge=0, le=100)]
 ResolutionQuery = Annotated[Resolution, Query()]
 AudioQuery = Annotated[AudioMode, Query()]
 WEB_DIR = Path(__file__).with_name("web")
+UPLOAD_WRITE_BUFFER_BYTES = 512 * 1024
 UNSAFE_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
 
 
@@ -65,7 +69,7 @@ def create_app(
     app = FastAPI(
         title="Media Manager API",
         version=__version__,
-        description="Bounded, preset-based media conversion for trusted automations.",
+        description="Bounded media conversion for trusted automations.",
         lifespan=lifespan,
         docs_url=None,
         redoc_url=None,
@@ -195,6 +199,7 @@ def create_app(
                 CapabilityOption(value=Quality.BALANCED, label="Balanced"),
                 CapabilityOption(value=Quality.HIGH, label="Higher quality"),
             ],
+            quality_scale=QualityScale(),
             resolutions=[
                 CapabilityOption(value=Resolution.SOURCE, label="Original resolution"),
                 CapabilityOption(value=Resolution.P480, label="480p / 854 px long edge"),
@@ -213,6 +218,7 @@ def create_app(
                 resolved_settings.max_upload_bytes,
             ),
             result_ttl_seconds=resolved_settings.result_ttl_seconds,
+            compression_target_bytes=COMPRESSION_TARGET_BYTES,
         )
 
     @app.post(
@@ -231,7 +237,8 @@ def create_app(
         request: Request,
         principal: PrincipalDependency,
         target: TargetQuery,
-        quality: QualityQuery = Quality.BALANCED,
+        quality: QualityQuery = None,
+        quality_percent: QualityPercentQuery = None,
         resolution: ResolutionQuery = Resolution.SOURCE,
         audio: AudioQuery = AudioMode.KEEP,
     ) -> UploadView:
@@ -242,13 +249,20 @@ def create_app(
         if upload_length > resolved_settings.max_upload_bytes:
             raise ApiError(413, "INPUT_TOO_LARGE", "Upload exceeds the size limit")
 
+        resolved_quality, resolved_percent = _resolve_quality(quality, quality_percent)
         options = ConversionOptions(
             target=target,
-            quality=quality,
+            quality=resolved_quality,
+            quality_percent=resolved_percent,
             resolution=resolution,
             audio=audio,
         )
-        job = await manager.reserve(principal.id, options, upload_length)
+        job = await manager.reserve(
+            principal.id,
+            options,
+            upload_length,
+            _source_filename(request),
+        )
         try:
             try:
                 async with aiofiles.open(job.input_path, "xb"):
@@ -313,6 +327,7 @@ def create_app(
                     async with asyncio.timeout(resolved_settings.upload_timeout_seconds):
                         async with aiofiles.open(job.input_path, "r+b") as destination:
                             await destination.seek(upload_offset)
+                            pending = bytearray()
                             async for chunk in request.stream():
                                 if not chunk:
                                     continue
@@ -323,7 +338,18 @@ def create_app(
                                         "CONTENT_LENGTH_MISMATCH",
                                         "Upload chunk length does not match its header",
                                     )
-                                await destination.write(chunk)
+                                if len(chunk) >= UPLOAD_WRITE_BUFFER_BYTES:
+                                    if pending:
+                                        await destination.write(pending)
+                                        pending.clear()
+                                    await destination.write(chunk)
+                                else:
+                                    pending.extend(chunk)
+                                    if len(pending) >= UPLOAD_WRITE_BUFFER_BYTES:
+                                        await destination.write(pending)
+                                        pending.clear()
+                            if pending:
+                                await destination.write(pending)
                 except TimeoutError as exc:
                     raise ApiError(
                         408,
@@ -381,7 +407,8 @@ def create_app(
         request: Request,
         principal: PrincipalDependency,
         target: TargetQuery,
-        quality: QualityQuery = Quality.BALANCED,
+        quality: QualityQuery = None,
+        quality_percent: QualityPercentQuery = None,
         resolution: ResolutionQuery = Resolution.SOURCE,
         audio: AudioQuery = AudioMode.KEEP,
     ) -> JobView:
@@ -390,19 +417,27 @@ def create_app(
             request,
             resolved_settings.max_upload_bytes,
         )
+        resolved_quality, resolved_percent = _resolve_quality(quality, quality_percent)
         options = ConversionOptions(
             target=target,
-            quality=quality,
+            quality=resolved_quality,
+            quality_percent=resolved_percent,
             resolution=resolution,
             audio=audio,
         )
-        job = await manager.reserve(principal.id, options, content_length)
+        job = await manager.reserve(
+            principal.id,
+            options,
+            content_length,
+            _source_filename(request),
+        )
         received = 0
 
         try:
             try:
                 async with asyncio.timeout(resolved_settings.upload_timeout_seconds):
                     async with aiofiles.open(job.input_path, "xb") as destination:
+                        pending = bytearray()
                         async for chunk in request.stream():
                             if not chunk:
                                 continue
@@ -413,7 +448,18 @@ def create_app(
                                     "INPUT_TOO_LARGE",
                                     "Upload exceeds the size limit",
                                 )
-                            await destination.write(chunk)
+                            if len(chunk) >= UPLOAD_WRITE_BUFFER_BYTES:
+                                if pending:
+                                    await destination.write(pending)
+                                    pending.clear()
+                                await destination.write(chunk)
+                            else:
+                                pending.extend(chunk)
+                                if len(pending) >= UPLOAD_WRITE_BUFFER_BYTES:
+                                    await destination.write(pending)
+                                    pending.clear()
+                        if pending:
+                            await destination.write(pending)
             except TimeoutError as exc:
                 raise ApiError(408, "UPLOAD_TIMEOUT", "Upload exceeded its time limit") from exc
             except OSError as exc:
@@ -431,6 +477,79 @@ def create_app(
             await manager.discard(job.id)
             raise
 
+    @app.post(
+        "/v1/compressions",
+        response_model=CompressionJobView,
+        status_code=202,
+        responses={
+            400: {"model": ErrorResponse},
+            401: {"model": ErrorResponse},
+            408: {"model": ErrorResponse},
+            413: {"model": ErrorResponse},
+            415: {"model": ErrorResponse},
+            422: {"model": ErrorResponse},
+            429: {"model": ErrorResponse},
+            507: {"model": ErrorResponse},
+        },
+    )
+    async def create_compression(
+        request: Request,
+        principal: PrincipalDependency,
+    ) -> CompressionJobView:
+        if request.query_params:
+            raise ApiError(422, "INVALID_OPTIONS", "Compression does not accept options")
+        content_length = _validate_upload_headers(request, resolved_settings.max_upload_bytes)
+        job = await manager.reserve_compression(
+            principal.id,
+            content_length,
+            _source_filename(request),
+        )
+        received = 0
+        try:
+            try:
+                async with asyncio.timeout(resolved_settings.upload_timeout_seconds):
+                    async with aiofiles.open(job.input_path, "xb") as destination:
+                        pending = bytearray()
+                        async for chunk in request.stream():
+                            if not chunk:
+                                continue
+                            received += len(chunk)
+                            if received > resolved_settings.max_upload_bytes:
+                                raise ApiError(
+                                    413,
+                                    "INPUT_TOO_LARGE",
+                                    "Upload exceeds the size limit",
+                                )
+                            if len(chunk) >= UPLOAD_WRITE_BUFFER_BYTES:
+                                if pending:
+                                    await destination.write(pending)
+                                    pending.clear()
+                                await destination.write(chunk)
+                            else:
+                                pending.extend(chunk)
+                                if len(pending) >= UPLOAD_WRITE_BUFFER_BYTES:
+                                    await destination.write(pending)
+                                    pending.clear()
+                        if pending:
+                            await destination.write(pending)
+            except TimeoutError as exc:
+                raise ApiError(408, "UPLOAD_TIMEOUT", "Upload exceeded its time limit") from exc
+            except OSError as exc:
+                raise ApiError(
+                    507,
+                    "INSUFFICIENT_STORAGE",
+                    "Upload workspace is unavailable",
+                ) from exc
+            await _chmod_private(job.input_path)
+            if received == 0:
+                raise ApiError(422, "EMPTY_INPUT", "Upload body is empty")
+            view = await manager.enqueue(job.id, received)
+            assert isinstance(view, CompressionJobView)
+            return view
+        except BaseException:
+            await manager.discard(job.id)
+            raise
+
     @app.get(
         "/v1/jobs/{job_id}",
         response_model=JobView,
@@ -440,7 +559,10 @@ def create_app(
         job_id: str,
         principal: PrincipalDependency,
     ) -> JobView:
-        return await manager.get(job_id, principal.id)
+        view = await manager.get(job_id, principal.id)
+        if not isinstance(view, JobView):
+            raise ApiError(404, "JOB_NOT_FOUND", "Job was not found")
+        return view
 
     @app.get(
         "/v1/jobs/{job_id}/content",
@@ -455,7 +577,7 @@ def create_app(
         job_id: str,
         principal: PrincipalDependency,
     ) -> FileResponse:
-        path, filename, media_type = await manager.download(job_id, principal.id)
+        path, filename, media_type = await manager.download(job_id, principal.id, False)
         return FileResponse(path=path, filename=filename, media_type=media_type)
 
     @app.delete(
@@ -467,7 +589,49 @@ def create_app(
         job_id: str,
         principal: PrincipalDependency,
     ) -> Response:
-        await manager.delete(job_id, principal.id)
+        await manager.delete(job_id, principal.id, False)
+        return Response(status_code=204)
+
+    @app.get(
+        "/v1/compressions/{job_id}",
+        response_model=CompressionJobView,
+        responses={401: {"model": ErrorResponse}, 404: {"model": ErrorResponse}},
+    )
+    async def get_compression(
+        job_id: str,
+        principal: PrincipalDependency,
+    ) -> CompressionJobView:
+        view = await manager.get(job_id, principal.id)
+        if not isinstance(view, CompressionJobView):
+            raise ApiError(404, "JOB_NOT_FOUND", "Job was not found")
+        return view
+
+    @app.get(
+        "/v1/compressions/{job_id}/content",
+        responses={
+            401: {"model": ErrorResponse},
+            404: {"model": ErrorResponse},
+            409: {"model": ErrorResponse},
+            410: {"model": ErrorResponse},
+        },
+    )
+    async def download_compression(
+        job_id: str,
+        principal: PrincipalDependency,
+    ) -> FileResponse:
+        path, filename, media_type = await manager.download(job_id, principal.id, True)
+        return FileResponse(path=path, filename=filename, media_type=media_type)
+
+    @app.delete(
+        "/v1/compressions/{job_id}",
+        status_code=204,
+        responses={401: {"model": ErrorResponse}, 404: {"model": ErrorResponse}},
+    )
+    async def delete_compression(
+        job_id: str,
+        principal: PrincipalDependency,
+    ) -> Response:
+        await manager.delete(job_id, principal.id, True)
         return Response(status_code=204)
 
     return app
@@ -482,6 +646,41 @@ def _validate_options(target: Target, resolution: Resolution, audio: AudioMode) 
         raise ApiError(422, "INVALID_OPTIONS", "Audio removal applies only to video output")
     if target is Target.ANIMATION_GIF and resolution in {Resolution.P1440, Resolution.P2160}:
         raise ApiError(422, "INVALID_OPTIONS", "GIF output is limited to 1080p")
+
+
+def _resolve_quality(
+    quality: Quality | None,
+    quality_percent: int | None,
+) -> tuple[Quality, int]:
+    if quality is not None and quality_percent is not None:
+        raise ApiError(
+            422,
+            "INVALID_OPTIONS",
+            "Use quality_percent or the legacy quality preset, not both",
+        )
+    if quality_percent is not None:
+        if quality_percent < 25:
+            bucket = Quality.ECONOMY
+        elif quality_percent < 75:
+            bucket = Quality.BALANCED
+        else:
+            bucket = Quality.HIGH
+        return bucket, quality_percent
+    legacy = quality or Quality.BALANCED
+    return legacy, {
+        Quality.ECONOMY: 0,
+        Quality.BALANCED: 50,
+        Quality.HIGH: 100,
+    }[legacy]
+
+
+def _source_filename(request: Request) -> str | None:
+    encoded = request.headers.get("Upload-Filename")
+    if not encoded:
+        return None
+    if len(encoded) > 768:
+        raise ApiError(422, "INVALID_FILENAME", "Upload filename is too long")
+    return unquote(encoded, errors="replace")
 
 
 def _validate_upload_headers(request: Request, max_upload_bytes: int) -> int | None:

@@ -1,10 +1,10 @@
 "use strict";
 
-const CACHE_NAME = "media-manager-shell-pwa1";
+const CACHE_NAME = "media-manager-shell-pwa3";
 const SHELL = new Map([
   ["/", "text/html"],
-  ["/assets/app.css?v=pwa1", "text/css"],
-  ["/assets/app.js?v=pwa1", "text/javascript"],
+  ["/assets/app.css?v=pwa3", "text/css"],
+  ["/assets/app.js?v=pwa3", "text/javascript"],
   ["/assets/logo.svg", "image/svg+xml"],
   ["/favicon.svg", "image/svg+xml"],
   ["/manifest.webmanifest", "application/manifest+json"],
@@ -14,7 +14,7 @@ const SHELL = new Map([
 ]);
 
 self.addEventListener("install", (event) => {
-  event.waitUntil(cacheShell().then(() => self.skipWaiting()));
+  event.waitUntil(cacheShell());
 });
 
 self.addEventListener("activate", (event) => {
@@ -23,6 +23,10 @@ self.addEventListener("activate", (event) => {
       names.filter((name) => name !== CACHE_NAME).map((name) => caches.delete(name)),
     )).then(() => self.clients.claim()),
   );
+});
+
+self.addEventListener("message", (event) => {
+  if (event.data === "SKIP_WAITING") self.skipWaiting();
 });
 
 self.addEventListener("fetch", (event) => {

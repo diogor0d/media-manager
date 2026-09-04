@@ -1,7 +1,7 @@
-# Media Manager iOS Shortcut
+# Media Manager iOS Shortcuts
 
 This directory defines a credential-free development and distribution package
-for a native iOS Shortcut that submits shared media to the Media Manager API.
+for two native iOS Shortcuts: `Convert Media` and `Compress Media`.
 It deliberately contains no API hostname, service-token value, Apple account
 data, iCloud link, or signed `.shortcut` binary.
 
@@ -14,7 +14,7 @@ the actions.
 
 - `README.md`: security model and platform-specific development and release
   workflow.
-- `spec.md`: exact native Shortcut behavior and API mapping.
+- `spec.md`: exact behavior and API mapping for both Shortcuts.
 - `tests/on-device.md`: release-gating tests that require an Apple device and a
   test API deployment.
 
@@ -73,9 +73,9 @@ policy change followed by new on-device tests.
 
 Maintain two separate Shortcuts on the authoring Apple device:
 
-- `Media Manager - Master`: blank configuration fields, blank import-question
+- `Convert Media - Master` and `Compress Media - Master`: blank configuration fields, blank import-question
   defaults, and no test credentials. Export only this copy.
-- `Media Manager - Test`: a duplicate used with a disposable test token. Never
+- Matching `- Test` copies used with a disposable test token. Never
   export or publish this copy.
 
 Before every release, inspect every `Text`, `Dictionary`, `URL`, and `Get
@@ -109,12 +109,12 @@ hostname or credentials. This package does not require one.
 
 ## Native authoring workflow
 
-1. On a current iPhone, iPad, or Mac, create `Media Manager - Master` in the
-   Shortcuts app.
-2. Implement [`spec.md`](spec.md) exactly, including all blank setup questions,
-   header repetitions, bounded polling, confirmation, and cleanup branches.
+1. On a current iPhone, iPad, or Mac, create `Convert Media - Master` and
+   `Compress Media - Master` in the Shortcuts app.
+2. Implement the two graphs in [`spec.md`](spec.md), including blank setup
+   questions, bounded polling, confirmation, and cleanup branches.
 3. Keep all three configuration `Text` actions blank in the master.
-4. Duplicate the master as `Media Manager - Test`.
+4. Duplicate both masters as matching `- Test` copies.
 5. Populate only the test copy with a disposable per-device token and test API
    base URL.
 6. Complete every applicable case in [`tests/on-device.md`](tests/on-device.md).
@@ -199,13 +199,13 @@ variables.
 
 A release is acceptable only when all of the following are true:
 
-- The master contains no hostname, credential, Apple account data, or private
+- Both masters contain no hostname, credential, Apple account data, or private
   media.
 - All three import-question defaults are blank.
 - The action graph matches [`spec.md`](spec.md).
 - Every HTTP action carries both exact Cloudflare Access header names.
 - Upload uses a raw `File` body, not Form, multipart, or JSON.
-- Polling performs no more than 120 status requests.
+- Polling performs no more than 200 status requests.
 - A user can cancel after seeing exact byte counts and before any download.
 - Success, explicit user cancellation, a reported `failed` state, timeout, and
   malformed ready data invoke `DELETE status_url` when a valid status URL is
@@ -223,19 +223,15 @@ A release is acceptable only when all of the following are true:
   network failure, HTTP error, or action error can stop execution before the
   cleanup request. The server must not depend exclusively on client-side
   `DELETE` for eventual cleanup.
-- The nominal polling window is about 595 seconds plus request time. Share Sheet
+- The nominal polling window is about 597 seconds plus request time. Share Sheet
   execution and large uploads can be constrained by the target iOS version,
   device memory, and the calling app.
-- The capabilities request carries authentication headers, but this release uses
-  a tested static option graph rather than dynamically constructing native menus.
-  If the HTTP action follows an Access redirect or returns an error body without
-  raising an action error, this request alone cannot prove authentication.
 - Failed jobs expose only the API's bounded public `error.code` and
   `error.message`. Raw FFmpeg output is never available to the Shortcut.
 - The contract requires credentials to be sent to the absolute `status_url` and
   `output.download_url` returned by the API. Both URLs are required to use
-  HTTPS. Deployments should keep them on trusted Access-protected origins and
-  test redirects carefully.
+  HTTPS on the exact configured API origin. Reject every other origin and test
+  redirects carefully.
 - The explicit `Cancel` menu branch requests cleanup. Dismissing a native menu
   through the system's own cancellation control may terminate the Shortcut
   before that branch runs. This must be tested and treated like any other

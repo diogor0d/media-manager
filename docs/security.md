@@ -35,8 +35,9 @@ other Docker or host processes that do not have a valid Access assertion.
   probe time, conversion time, and output size are bounded.
 - Only validated stream indexes are mapped. Input streams are decoded and
   re-encoded; stream copy is never used.
-- Source metadata, chapters, subtitles, data streams, attachments, and original
-  filenames are not retained in the output contract.
+- Source metadata, chapters, subtitles, data streams, and attachments are not
+  retained. An optional sanitized source basename is retained only with the
+  disposable in-memory job to produce a `-converted` or `-compressed` result name.
 - Completed output is probed again and its container, codec, stream count, and
   byte size are validated before it becomes downloadable.
 - Input and partial files are removed on completion, rejection, cancellation,
@@ -71,8 +72,8 @@ Outbound HTTPS remains available because Access signing keys must be refreshed.
   verified Access principal; offsets, declared total, chunk size, and expiry are
   enforced at the origin. An authenticated user can still occupy the single job
   slot until deletion or the two-hour incomplete-upload expiry.
-- The container installs the current Debian FFmpeg security package when built.
-  The Python and uv bases are digest-pinned, but Debian package repository state
+- The container installs the current Alpine FFmpeg security package when built.
+  The Python and uv bases are digest-pinned, but Alpine package repository state
   is not immutable. Record the final image digest, package inventory, and build
   date; rebuild promptly for FFmpeg and base-image security updates.
 - FFmpeg-only image conversion has unverified fidelity for HEIC orientation,
@@ -85,13 +86,17 @@ Outbound HTTPS remains available because Access signing keys must be refreshed.
   authoritative cleanup mechanism.
 - Exact size preview is available only after conversion. CPU has already been
   spent even if the user declines the download.
+- Automatic compression may run up to five sequential encodes within one
+  15-minute overall timeout. Existing queue, disk, and cancellation controls
+  still apply, but hostile inputs can
+  deliberately consume more CPU than a single conversion.
 
 ## Explicit non-goals
 
 - Durable, resumable, batch, or multi-host jobs.
 - URL imports, archives, documents, SVG/PostScript/PDF, camera RAW, subtitles,
   DRM, stream copy, arbitrary transforms, or hardware acceleration.
-- Retaining EXIF/GPS metadata or original filenames.
+- Retaining EXIF/GPS metadata or source filenames beyond the disposable job.
 - Guaranteeing that a conversion is smaller or visually lossless.
 - Claiming support for every demuxer or decoder in the installed FFmpeg build.
 

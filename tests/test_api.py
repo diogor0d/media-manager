@@ -16,8 +16,14 @@ from fastapi import FastAPI, Request
 from media_manager.app import create_app
 from media_manager.auth import Principal, get_principal
 from media_manager.config import AuthMode, Settings
-from media_manager.models import ConversionOptions, MediaClass, MediaMetadata
-from media_manager.processor import ConversionCancelled, ConversionResult
+from media_manager.models import (
+    CompressionMetadata,
+    ConversionOptions,
+    MediaClass,
+    MediaMetadata,
+    Target,
+)
+from media_manager.processor import CompressionResult, ConversionCancelled, ConversionResult
 
 pytestmark = pytest.mark.asyncio
 
@@ -49,6 +55,7 @@ class FakeProcessor:
         job_dir: Path,
         options: ConversionOptions,
         cancel_event: asyncio.Event,
+        progress_callback=None,
     ) -> ConversionResult:
         source = input_path.read_bytes()
         self.input_paths.append(input_path)
@@ -56,6 +63,8 @@ class FakeProcessor:
         self.options.append(options)
         self.inputs.append(source)
         self.convert_started.set()
+        if progress_callback:
+            await progress_callback("converting", 42)
 
         try:
             await self._wait_until_released(cancel_event)
@@ -99,6 +108,38 @@ class FakeProcessor:
                 if not waiter.done():
                     waiter.cancel()
             await asyncio.gather(*waiters, return_exceptions=True)
+
+    async def compress(
+        self,
+        input_path: Path,
+        job_dir: Path,
+        cancel_event: asyncio.Event,
+        progress_callback=None,
+    ) -> CompressionResult:
+        converted = await self.convert(
+            input_path,
+            job_dir,
+            ConversionOptions(target=Target.VIDEO_MP4, quality_percent=0),
+            cancel_event,
+            progress_callback,
+        )
+        return CompressionResult(
+            input=converted.input,
+            output_path=converted.output_path,
+            output_bytes=converted.output_bytes,
+            filename=converted.filename,
+            media_type=converted.media_type,
+            width=converted.width,
+            height=converted.height,
+            duration_ms=converted.duration_ms,
+            compression=CompressionMetadata(
+                target_bytes=20_000_000,
+                aim_bytes=19_000_000,
+                met_target=True,
+                attempts=1,
+                selected_target=Target.VIDEO_MP4,
+            ),
+        )
 
 
 def make_settings(tmp_path: Path, **overrides: object) -> Settings:
@@ -205,11 +246,26 @@ async def test_capabilities_report_the_supported_contract_and_limits(tmp_path: P
         "audio-mp3": (["source"], ["keep"]),
         "audio-opus": (["source"], ["keep"]),
     }
+    quality_profiles = {}
     for target in body["targets"]:
         assert (
             target.pop("allowed_resolutions"),
             target.pop("allowed_audio_modes"),
         ) == expected_matrices[target["value"]]
+        quality_profiles[target["value"]] = (
+            target.pop("quality_metrics"),
+            target.pop("quality_note"),
+        )
+
+    assert quality_profiles["video-mp4"][0][0] == {
+        "label": "H.264 CRF",
+        "economy": 32,
+        "balanced": 26,
+        "high": 20,
+        "unit": "CRF",
+        "higher_is_better": False,
+    }
+    assert "lossless" in quality_profiles["image-png"][1].lower()
 
     assert body == {
         "targets": [
@@ -282,6 +338,7 @@ async def test_capabilities_report_the_supported_contract_and_limits(tmp_path: P
             {"value": "balanced", "label": "Balanced"},
             {"value": "high", "label": "Higher quality"},
         ],
+        "quality_scale": {"minimum": 0, "maximum": 100, "step": 1, "default": 50},
         "resolutions": [
             {"value": "source", "label": "Original resolution"},
             {"value": "480p", "label": "480p / 854 px long edge"},
@@ -297,6 +354,7 @@ async def test_capabilities_report_the_supported_contract_and_limits(tmp_path: P
         "max_upload_bytes": 789,
         "max_chunk_bytes": 789,
         "result_ttl_seconds": 456,
+        "compression_target_bytes": 20_000_000,
     }
 
 
@@ -365,15 +423,132 @@ async def test_authenticated_chunk_upload_resumes_by_offset_then_converts(
         assert completed.status_code == 202
         assert completed.json()["state"] == "queued"
         await asyncio.wait_for(processor.convert_started.wait(), timeout=5)
-        assert processor.inputs == [SOURCE_CONTENT]
-
         processor.release.set()
         await asyncio.wait_for(processor.convert_finished.wait(), timeout=5)
         ready = await wait_for_state(client, job_id, "ready")
         assert ready["output"]["bytes"] == len(OUTPUT_CONTENT)
         assert (await client.delete(f"/v1/jobs/{job_id}")).status_code == 204
         assert list(settings.work_dir.iterdir()) == []
+    assert processor.inputs == [SOURCE_CONTENT]
 
+
+async def test_compression_job_uses_fixed_target_and_returns_downloadable_result(
+    tmp_path: Path,
+) -> None:
+    app = create_app(make_settings(tmp_path), processor=FakeProcessor())
+
+    async with running_client(app) as client:
+        invalid = await client.post(
+            "/v1/compressions?quality_percent=0",
+            content=SOURCE_CONTENT,
+        )
+        assert_error(
+            invalid,
+            422,
+            "INVALID_OPTIONS",
+            "Compression does not accept options",
+        )
+        created = await client.post(
+            "/v1/compressions",
+            content=SOURCE_CONTENT,
+            headers={"Upload-Filename": "holiday%20clip.mov"},
+        )
+        assert created.status_code == 202
+        job_id = created.json()["id"]
+        assert created.json()["status_url"] == f"{PUBLIC_BASE_URL}/v1/compressions/{job_id}"
+
+        for _ in range(100):
+            response = await client.get(f"/v1/compressions/{job_id}")
+            assert response.status_code == 200
+            job = response.json()
+            if job["state"] == "ready":
+                break
+            await asyncio.sleep(0)
+        else:
+            pytest.fail("Compression job did not become ready")
+
+        assert job["compression"] == {
+            "target_bytes": 20_000_000,
+            "aim_bytes": 19_000_000,
+            "met_target": True,
+            "attempts": 1,
+            "selected_target": "video-mp4",
+        }
+        assert job["output"]["filename"] == "holiday clip-compressed.mp4"
+        assert job["output"]["bytes"] == len(OUTPUT_CONTENT)
+        assert (await client.get(f"/v1/jobs/{job_id}")).status_code == 404
+        downloaded = await client.get(f"/v1/compressions/{job_id}/content")
+        assert downloaded.content == OUTPUT_CONTENT
+        assert (await client.delete(f"/v1/compressions/{job_id}")).status_code == 204
+
+
+async def test_quality_percentage_is_exact_and_legacy_presets_remain_supported(
+    tmp_path: Path,
+) -> None:
+    processor = FakeProcessor()
+    app = create_app(make_settings(tmp_path), processor=processor)
+
+    async with running_client(app) as client:
+        percentage = await client.post(
+            "/v1/jobs",
+            params={"target": "video-mp4", "quality_percent": "73"},
+            content=SOURCE_CONTENT,
+        )
+        assert percentage.status_code == 202
+        assert percentage.json()["quality_percent"] == 73
+        assert percentage.json()["quality"] == "balanced"
+        await wait_for_state(client, percentage.json()["id"], "ready")
+
+        legacy = await client.post(
+            "/v1/jobs",
+            params={"target": "video-mp4", "quality": "economy"},
+            content=SOURCE_CONTENT,
+        )
+        assert legacy.status_code == 202
+        assert legacy.json()["quality_percent"] == 0
+
+        conflict = await client.post(
+            "/v1/jobs",
+            params={
+                "target": "video-mp4",
+                "quality": "high",
+                "quality_percent": "100",
+            },
+            content=SOURCE_CONTENT,
+        )
+        assert_error(
+            conflict,
+            422,
+            "INVALID_OPTIONS",
+            "Use quality_percent or the legacy quality preset, not both",
+        )
+
+        invalid = await client.post(
+            "/v1/jobs",
+            params={"target": "video-mp4", "quality_percent": "101"},
+            content=SOURCE_CONTENT,
+        )
+        assert_error(invalid, 422, "INVALID_REQUEST", "Request parameters are invalid")
+
+    assert processor.options[0].quality_percent == 73
+    assert processor.options[1].quality_percent == 0
+
+
+async def test_download_filename_uses_sanitized_source_basename(tmp_path: Path) -> None:
+    app = create_app(make_settings(tmp_path), processor=FakeProcessor())
+
+    async with running_client(app) as client:
+        created = await client.post(
+            "/v1/jobs",
+            params={"target": "video-mp4"},
+            content=SOURCE_CONTENT,
+            headers={"Upload-Filename": "..%2Ffolder%5CCamera%20Clip.MOV"},
+        )
+        ready = await wait_for_state(client, created.json()["id"], "ready")
+        download = await client.get(ready["output"]["download_url"])
+
+    assert ready["output"]["filename"] == "Camera Clip-converted.mp4"
+    assert "Camera%20Clip-converted.mp4" in download.headers["content-disposition"]
 
 async def test_chunk_size_limit_is_enforced_before_writing(tmp_path: Path) -> None:
     settings = make_settings(tmp_path, max_chunk_bytes=4)
@@ -524,6 +699,13 @@ async def test_web_interface_and_assets_are_served_with_browser_security_headers
     assert 'state.resumeAction = "upload"' in responses["/assets/app.js"].text
     assert 'state.resumeAction = "poll"' in responses["/assets/app.js"].text
     assert 'download.setAttribute("aria-disabled"' in responses["/assets/app.js"].text
+    assert 'type="range" min="0" max="100" step="1" value="50"' in responses["/"].text
+    assert 'data-stage="converting"' in responses["/"].text
+    assert 'quality_percent: qualityPercent' in responses["/assets/app.js"].text
+    assert '"Upload-Filename": encodeURIComponent(state.file.name)' in responses[
+        "/assets/app.js"
+    ].text
+    assert 'job.progress?.percent' in responses["/assets/app.js"].text
     assert "Media Manager" in responses["/assets/logo.svg"].text
     assert responses["/favicon.svg"].headers["content-type"] == "image/svg+xml"
     manifest = responses["/manifest.webmanifest"]
@@ -560,8 +742,13 @@ async def test_web_interface_and_assets_are_served_with_browser_security_headers
     assert worker.headers["service-worker-allowed"] == "/"
     assert 'url.pathname.startsWith("/v1/")' in worker.text
     assert 'request.mode === "navigate" && url.pathname === "/"' in worker.text
-    assert '["/assets/app.js?v=pwa1", "text/javascript"]' in worker.text
-    assert "cacheShell().then(() => self.skipWaiting())" in worker.text
+    assert '["/assets/app.js?v=pwa3", "text/javascript"]' in worker.text
+    assert 'navigator.canShare?.({ files: [file] })' in responses["/assets/app.js"].text
+    assert 'sessionStorage.setItem(RECOVERY_KEY, job.id)' in responses["/assets/app.js"].text
+    assert 'item.setAttribute("aria-current", "step")' in responses["/assets/app.js"].text
+    assert 'env(safe-area-inset-bottom)' in responses["/assets/app.css"].text
+    assert 'event.data === "SKIP_WAITING"' in worker.text
+    assert "event.waitUntil(cacheShell())" in worker.text
     assert ").then(() => self.clients.claim())" in worker.text
     assert "Invalid application shell response" in worker.text
     for path in (
@@ -631,7 +818,10 @@ async def test_raw_upload_transitions_to_ready_then_downloads_and_deletes_exact_
                 "audio": "drop",
             },
             content=SOURCE_CONTENT,
-            headers={"Content-Type": "video/quicktime"},
+            headers={
+                "Content-Type": "video/quicktime",
+                "Upload-Filename": "Holiday.Final.MOV",
+            },
         )
         assert created_response.status_code == 202
         created = created_response.json()
@@ -643,6 +833,7 @@ async def test_raw_upload_transitions_to_ready_then_downloads_and_deletes_exact_
             "state": "queued",
             "target": "video-mp4",
             "quality": "high",
+            "quality_percent": 100,
             "resolution": "720p",
             "audio": "drop",
             "created_at": created["created_at"],
@@ -651,6 +842,7 @@ async def test_raw_upload_transitions_to_ready_then_downloads_and_deletes_exact_
             "input": None,
             "output": None,
             "error": None,
+            "progress": {"stage": "queued", "percent": None},
         }
         assert datetime.fromisoformat(created["created_at"]).tzinfo is not None
 
@@ -658,11 +850,16 @@ async def test_raw_upload_transitions_to_ready_then_downloads_and_deletes_exact_
         processing_response = await client.get(expected_status_url)
         assert processing_response.status_code == 200
         processing = processing_response.json()
-        assert processing == {**created, "state": "processing"}
+        assert processing == {
+            **created,
+            "state": "processing",
+            "progress": {"stage": "converting", "percent": 42},
+        }
         assert processor.inputs == [SOURCE_CONTENT]
         assert processor.options[0].model_dump(mode="json") == {
             "target": "video-mp4",
             "quality": "high",
+            "quality_percent": 100,
             "resolution": "720p",
             "audio": "drop",
         }
@@ -678,6 +875,7 @@ async def test_raw_upload_transitions_to_ready_then_downloads_and_deletes_exact_
             "state": "ready",
             "target": "video-mp4",
             "quality": "high",
+            "quality_percent": 100,
             "resolution": "720p",
             "audio": "drop",
             "created_at": created["created_at"],
@@ -695,7 +893,7 @@ async def test_raw_upload_transitions_to_ready_then_downloads_and_deletes_exact_
             },
             "output": {
                 "bytes": len(OUTPUT_CONTENT),
-                "filename": "converted.mp4",
+                "filename": "Holiday.Final-converted.mp4",
                 "media_type": "video/mp4",
                 "download_url": ready["output"]["download_url"],
                 "width": 1280,
@@ -703,6 +901,7 @@ async def test_raw_upload_transitions_to_ready_then_downloads_and_deletes_exact_
                 "duration_ms": 12_345,
             },
             "error": None,
+            "progress": None,
         }
         assert ready["expires_at"] is not None
         assert datetime.fromisoformat(ready["expires_at"]) > datetime.fromisoformat(
@@ -717,7 +916,8 @@ async def test_raw_upload_transitions_to_ready_then_downloads_and_deletes_exact_
         assert download.content == OUTPUT_CONTENT
         assert download.headers["content-type"] == "video/mp4"
         assert download.headers["content-length"] == str(len(OUTPUT_CONTENT))
-        assert download.headers["content-disposition"] == 'attachment; filename="converted.mp4"'
+        assert ready["output"]["filename"] == "Holiday.Final-converted.mp4"
+        assert "Holiday.Final-converted.mp4" in download.headers["content-disposition"]
 
         deleted = await client.delete(expected_status_url)
         assert deleted.status_code == 204

@@ -13,8 +13,8 @@
   <link rel="icon" href="/favicon.svg" type="image/svg+xml">
   <link rel="apple-touch-icon" href="/assets/apple-touch-icon.png">
   <link rel="manifest" href="/manifest.webmanifest">
-  <link rel="stylesheet" href="/assets/app.css?v=pwa1">
-  <script src="/assets/app.js?v=pwa1" defer></script>
+  <link rel="stylesheet" href="/assets/app.css?v=pwa3">
+  <script src="/assets/app.js?v=pwa3" defer></script>
 </head>
 <body>
   <header class="masthead">
@@ -32,7 +32,7 @@
     </section>
 
     <section class="bench" aria-label="Media conversion">
-      <div id="drop-zone" class="drop-zone" tabindex="0" role="button" aria-controls="file-input">
+      <div id="drop-zone" class="drop-zone" tabindex="0" role="button" aria-controls="file-input" data-view-focus>
         <input id="file-input" type="file" accept="image/*,video/*,audio/*" hidden>
         <div class="drop-mark" aria-hidden="true"><span></span><i></i></div>
         <div class="drop-prompt">
@@ -43,7 +43,7 @@
       </div>
 
       <div id="workspace" class="workspace" hidden>
-        <article class="source-panel">
+        <article class="source-panel" data-view-focus tabindex="-1">
           <div class="section-label"><span>Source</span><button id="replace-file" type="button">Replace</button></div>
           <div id="preview" class="preview" aria-label="Local file preview"></div>
           <h2 id="file-name" class="file-name"></h2>
@@ -66,9 +66,13 @@
           </fieldset>
 
           <div class="option-grid">
-            <fieldset>
-              <legend>Quality</legend>
-              <div id="quality-options" class="segment-options"></div>
+            <fieldset class="quality-field">
+              <legend>Quality <output id="quality-value" for="quality-slider">50%</output></legend>
+              <label class="sr-only" for="quality-slider">Output quality</label>
+              <input id="quality-slider" type="range" min="0" max="100" step="1" value="50" aria-describedby="quality-detail quality-note" aria-valuetext="50%, balanced">
+              <div class="quality-scale" aria-hidden="true"><span>0%</span><span>50%</span><span>100%</span></div>
+              <p id="quality-detail" class="quality-detail"></p>
+              <p id="quality-note" class="quality-note"></p>
             </fieldset>
             <label id="resolution-field" class="select-field">
               <span>Resolution</span>
@@ -81,16 +85,24 @@
             <div id="audio-options" class="segment-options"></div>
           </fieldset>
 
+          <div class="mobile-action-dock">
           <button id="convert-button" class="primary-action" type="submit">
             <span>Convert</span><strong id="convert-extension"></strong>
           </button>
+          </div>
         </form>
       </div>
 
-      <div id="progress-view" class="progress-view" hidden>
+      <div id="progress-view" class="progress-view" hidden data-view-focus tabindex="-1">
         <div class="process-aperture" aria-hidden="true"><span></span><i></i><b></b></div>
         <p id="progress-kicker" class="eyebrow">UPLOADING</p>
         <h2 id="progress-title">Sending the file once…</h2>
+        <ol id="progress-stages" class="progress-stages" aria-label="Conversion stages">
+          <li data-stage="upload"><span>01</span><strong>Upload</strong><small>Transfer source</small></li>
+          <li data-stage="inspecting"><span>02</span><strong>Inspect</strong><small>Verify streams</small></li>
+          <li data-stage="converting"><span>03</span><strong>Convert</strong><small>Encode output</small></li>
+          <li data-stage="validating"><span>04</span><strong>Verify</strong><small>Check result</small></li>
+        </ol>
         <div id="upload-meter" class="upload-meter" role="progressbar" aria-label="Upload progress" aria-valuemin="0" aria-valuemax="100">
           <span id="upload-bar"></span>
         </div>
@@ -98,7 +110,7 @@
         <button id="cancel-button" class="text-action" type="button">Cancel and discard</button>
       </div>
 
-      <div id="result-view" class="result-view" hidden>
+      <div id="result-view" class="result-view" hidden data-view-focus tabindex="-1">
         <p class="ready-label"><span aria-hidden="true"></span>Ready</p>
         <h2>The result is yours to judge.</h2>
         <div class="receipt">
@@ -109,12 +121,13 @@
         <p id="size-difference" class="size-difference"></p>
         <p id="expiry-copy" class="expiry-copy"></p>
         <div class="result-actions">
-          <a id="download-button" class="primary-action" href="#" download>Download <strong id="download-extension"></strong></a>
+          <button id="share-button" class="primary-action" type="button" hidden>Share or save <strong id="share-extension"></strong></button>
+          <a id="download-button" class="secondary-action" href="#" download>Open <strong id="download-extension"></strong></a>
           <button id="discard-button" class="secondary-action" type="button">Discard result</button>
         </div>
       </div>
 
-      <div id="error-view" class="error-view" role="alert" hidden>
+      <div id="error-view" class="error-view" role="alert" hidden data-view-focus tabindex="-1">
         <p class="eyebrow">CONVERSION STOPPED</p>
         <h2 id="error-title">This file could not be converted.</h2>
         <p id="error-detail"></p>
@@ -124,6 +137,11 @@
 
     <p id="live-status" class="sr-only" aria-live="polite"></p>
   </main>
+
+  <aside id="update-notice" class="update-notice" hidden>
+    <p>A newer converter is ready.</p>
+    <button id="update-button" type="button">Update when safe</button>
+  </aside>
 
   <footer>
     <p>Files are processed as disposable jobs and removed automatically.</p>

@@ -2,14 +2,11 @@
 
 ## State
 
-This is repository-prepared `INTENDED` state. No server connection, remote
-file, container, volume, listener, Cloudflare route, DNS record, Access
-application, firewall rule, monitor, or production secret is touched by this
-repository alone.
-
-The application is validated locally only: unit, authentication, integration,
-and in-container tests pass. Treat every runtime claim as unproven until the
-validation matrix below has been executed on the target host.
+An earlier revision (`8f2e2b9be87b98b7fc6efdeac8f7338c1d872e5e`) is deployed
+behind Cloudflare Access. The current worktree's compression endpoint, progress,
+quality scale, filename handling, PWA changes, and Shortcut contracts are local
+prepared state only. No production mutation is authorized by this document;
+repeat the validation matrix for the exact new image before deployment.
 
 ## Intended architecture
 
@@ -155,12 +152,13 @@ In-flight and retained jobs are disposable and will be lost on every restart.
 | Local origin | Host request to the loopback `/health/ready` returns `200` |
 | Edge denial | External request without Access credentials is denied before media reaches the origin |
 | Edge allow | Dedicated test token can read capabilities, convert a synthetic fixture, poll, preview, download, and delete |
-| Browser flow | Interactive Access login loads the authenticated UI and assets; drop, options, upload, status, download, and discard work without cross-origin requests |
+| Browser flow | Interactive Access login loads the authenticated UI and assets; iPhone safe areas, file selection, options, resumable upload, recovered polling, native sharing, update deferral, and discard work without cross-origin requests |
 | Origin JWT | Missing/invalid/wrong-audience assertions fail when testing the origin through an approved isolated path |
 | Isolation | A second principal receives `404` for the first principal's job |
 | Exposure | No wildcard, LAN, VPN, router, or IPv6 listener exists for the published loopback port |
 | Limits | Oversized, malformed, playlist, excessive-dimension/duration, timeout, cancellation, and queue-full cases stay bounded and clean up |
 | Resources | Representative image/video/GIF conversions remain inside measured CPU, memory, PID, disk, and time budgets |
+| Compression | Video, image, and audio select the documented canonical outputs; sub-20 MB and over-target results report measured status correctly; cancellation removes every attempt directory |
 | Logs | No token, assertion, header, media content, source filename, metadata, or raw FFmpeg error is present |
 | Cleanup | Explicit delete, expiry, restart, failed conversion, and client abandonment leave no stale files |
 | iOS | Signed-file/iCloud import, Wi-Fi/cellular upload, polling, exact size preview, cancel-before-download, save/share, expiry, and bad-token cases pass |
@@ -194,7 +192,7 @@ decision.
 
 Update by building a new clean revision and digest, retaining the previous image
 through the rollback window, recreating only this service, and rerunning the
-validation matrix. Rebuild promptly for FFmpeg, Python, Debian, FastAPI, PyJWT,
+validation matrix. Rebuild promptly for FFmpeg, Python, Alpine, FastAPI, PyJWT,
 and cryptography security updates.
 
 For decommissioning, first stop distributing the Shortcut, remove the Access

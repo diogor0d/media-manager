@@ -5,7 +5,9 @@ import json
 import math
 import os
 import re
+import shutil
 import signal
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -14,10 +16,13 @@ from media_manager.config import Settings
 from media_manager.errors import ProcessingError
 from media_manager.models import (
     AudioMode,
+    CompressionMetadata,
     ConversionOptions,
+    JobProgressStage,
     MediaClass,
     MediaMetadata,
     Quality,
+    QualityMetric,
     Resolution,
     Target,
     TargetCapability,
@@ -76,6 +81,10 @@ RESOLUTION_MAX_EDGE = {
     Resolution.P1440: 2560,
     Resolution.P2160: 3840,
 }
+ProgressCallback = Callable[[JobProgressStage, int | None], Awaitable[None]]
+COMPRESSION_TARGET_BYTES = 20_000_000
+COMPRESSION_AIM_BYTES = 19_000_000
+COMPRESSION_TIMEOUT_SECONDS = 15 * 60
 
 
 @dataclass(frozen=True, slots=True)
@@ -88,6 +97,8 @@ class TargetSpec:
     video_codec: str | None = None
     audio_codec: str | None = None
     timeout_seconds: int = 300
+    quality_metrics: tuple[QualityMetric, ...] = ()
+    quality_note: str = "Higher percentages prioritize fidelity within the supported range."
 
 
 TARGET_SPECS = {
@@ -99,6 +110,19 @@ TARGET_SPECS = {
         formats=frozenset({"3g2", "3gp", "m4a", "mj2", "mov", "mp4"}),
         video_codec="h264",
         timeout_seconds=600,
+        quality_metrics=(
+            QualityMetric(
+                label="H.264 CRF",
+                economy=32,
+                balanced=26,
+                high=20,
+                unit="CRF",
+                higher_is_better=False,
+            ),
+            QualityMetric(
+                label="AAC audio", economy=96, balanced=160, high=256, unit="kb/s"
+            ),
+        ),
     ),
     Target.VIDEO_WEBM: TargetSpec(
         label="WebM (VP9)",
@@ -108,6 +132,19 @@ TARGET_SPECS = {
         formats=frozenset({"matroska", "webm"}),
         video_codec="vp9",
         timeout_seconds=600,
+        quality_metrics=(
+            QualityMetric(
+                label="VP9 CRF",
+                economy=40,
+                balanced=32,
+                high=24,
+                unit="CRF",
+                higher_is_better=False,
+            ),
+            QualityMetric(
+                label="Opus audio", economy=64, balanced=128, high=192, unit="kb/s"
+            ),
+        ),
     ),
     Target.IMAGE_JPEG: TargetSpec(
         label="JPEG",
@@ -117,6 +154,19 @@ TARGET_SPECS = {
         formats=frozenset({"image2", "jpeg_pipe"}),
         video_codec="mjpeg",
         timeout_seconds=60,
+        quality_metrics=(
+            QualityMetric(
+                label="JPEG qscale",
+                economy=8,
+                balanced=5,
+                high=2,
+                unit="q",
+                higher_is_better=False,
+            ),
+        ),
+        quality_note=(
+            "Lower qscale means higher visual quality; the percentage accounts for that."
+        ),
     ),
     Target.IMAGE_PNG: TargetSpec(
         label="PNG",
@@ -126,6 +176,15 @@ TARGET_SPECS = {
         formats=frozenset({"image2", "png_pipe"}),
         video_codec="png",
         timeout_seconds=60,
+        quality_metrics=(
+            QualityMetric(
+                label="PNG compression", economy=3, balanced=6, high=9, unit="/9"
+            ),
+        ),
+        quality_note=(
+            "PNG remains lossless. This changes compression effort and file size, "
+            "not visual quality."
+        ),
     ),
     Target.IMAGE_WEBP: TargetSpec(
         label="WebP",
@@ -135,6 +194,11 @@ TARGET_SPECS = {
         formats=frozenset({"image2", "webp_pipe"}),
         video_codec="webp",
         timeout_seconds=60,
+        quality_metrics=(
+            QualityMetric(
+                label="WebP quality", economy=60, balanced=78, high=90, unit="/100"
+            ),
+        ),
     ),
     Target.ANIMATION_GIF: TargetSpec(
         label="Animated GIF",
@@ -144,6 +208,14 @@ TARGET_SPECS = {
         formats=frozenset({"gif"}),
         video_codec="gif",
         timeout_seconds=120,
+        quality_metrics=(
+            QualityMetric(
+                label="Frame rate", economy=8, balanced=12, high=15, unit="fps"
+            ),
+            QualityMetric(
+                label="Palette", economy=64, balanced=128, high=256, unit="colors"
+            ),
+        ),
     ),
     Target.AUDIO_M4A: TargetSpec(
         label="M4A (AAC)",
@@ -153,6 +225,11 @@ TARGET_SPECS = {
         formats=frozenset({"3g2", "3gp", "m4a", "mj2", "mov", "mp4"}),
         audio_codec="aac",
         timeout_seconds=300,
+        quality_metrics=(
+            QualityMetric(
+                label="AAC audio", economy=96, balanced=160, high=256, unit="kb/s"
+            ),
+        ),
     ),
     Target.AUDIO_MP3: TargetSpec(
         label="MP3",
@@ -162,6 +239,11 @@ TARGET_SPECS = {
         formats=frozenset({"mp3"}),
         audio_codec="mp3",
         timeout_seconds=300,
+        quality_metrics=(
+            QualityMetric(
+                label="MP3 audio", economy=96, balanced=160, high=256, unit="kb/s"
+            ),
+        ),
     ),
     Target.AUDIO_OPUS: TargetSpec(
         label="Ogg Opus",
@@ -171,6 +253,11 @@ TARGET_SPECS = {
         formats=frozenset({"ogg"}),
         audio_codec="opus",
         timeout_seconds=300,
+        quality_metrics=(
+            QualityMetric(
+                label="Opus audio", economy=64, balanced=128, high=192, unit="kb/s"
+            ),
+        ),
     ),
 }
 
@@ -211,6 +298,11 @@ class ConversionResult:
 
 
 @dataclass(frozen=True, slots=True)
+class CompressionResult(ConversionResult):
+    compression: CompressionMetadata
+
+
+@dataclass(frozen=True, slots=True)
 class CommandResult:
     returncode: int
     stdout: bytes
@@ -246,6 +338,8 @@ def target_capabilities() -> list[TargetCapability]:
                 if target in {Target.VIDEO_MP4, Target.VIDEO_WEBM}
                 else [AudioMode.KEEP]
             ),
+            quality_metrics=list(spec.quality_metrics),
+            quality_note=spec.quality_note,
         )
         for target, spec in TARGET_SPECS.items()
     ]
@@ -257,20 +351,22 @@ class MediaProcessor:
 
     async def verify(self) -> None:
         try:
-            version = await self._run_command(
-                [self._settings.ffprobe_path, "-version"],
-                timeout=10,
-                stdout_limit=64 * 1024,
-            )
-            encoders = await self._run_command(
-                [self._settings.ffmpeg_path, "-hide_banner", "-encoders"],
-                timeout=10,
-                stdout_limit=512 * 1024,
-            )
-            filters = await self._run_command(
-                [self._settings.ffmpeg_path, "-hide_banner", "-filters"],
-                timeout=10,
-                stdout_limit=512 * 1024,
+            version, encoders, filters = await asyncio.gather(
+                self._run_command(
+                    [self._settings.ffprobe_path, "-version"],
+                    timeout=10,
+                    stdout_limit=64 * 1024,
+                ),
+                self._run_command(
+                    [self._settings.ffmpeg_path, "-hide_banner", "-encoders"],
+                    timeout=10,
+                    stdout_limit=512 * 1024,
+                ),
+                self._run_command(
+                    [self._settings.ffmpeg_path, "-hide_banner", "-filters"],
+                    timeout=10,
+                    stdout_limit=512 * 1024,
+                ),
             )
         except (OSError, _CommandTimeout) as exc:
             raise RuntimeError("Required FFmpeg tools are unavailable") from exc
@@ -312,7 +408,10 @@ class MediaProcessor:
         job_dir: Path,
         options: ConversionOptions,
         cancel_event: asyncio.Event,
+        progress_callback: ProgressCallback | None = None,
     ) -> ConversionResult:
+        if progress_callback:
+            await progress_callback(JobProgressStage.INSPECTING, None)
         source = await self._probe(input_path, cancel_event=cancel_event)
         self._validate_input(source, options)
 
@@ -320,6 +419,9 @@ class MediaProcessor:
         partial_path = job_dir / f"result.part.{spec.extension}"
         final_path = job_dir / f"result.{spec.extension}"
         command = self._build_command(input_path, partial_path, source, options)
+        if progress_callback:
+            initial_percent = 0 if source.media.duration_ms else None
+            await progress_callback(JobProgressStage.CONVERTING, initial_percent)
 
         try:
             result = await self._run_command(
@@ -328,6 +430,8 @@ class MediaProcessor:
                 cancel_event=cancel_event,
                 stdout_limit=64 * 1024,
                 stderr_limit=64 * 1024,
+                progress_duration_ms=source.media.duration_ms,
+                progress_callback=progress_callback,
             )
         except _CommandTimeout as exc:
             raise ProcessingError(
@@ -345,6 +449,8 @@ class MediaProcessor:
         if output_bytes > self._settings.max_output_bytes:
             raise ProcessingError("OUTPUT_TOO_LARGE", "Converted media exceeds the output limit")
 
+        if progress_callback:
+            await progress_callback(JobProgressStage.VALIDATING, 100)
         output_probe = await self._probe(partial_path, cancel_event=cancel_event)
         self._validate_output(output_probe, options.target)
         partial_path.replace(final_path)
@@ -358,6 +464,163 @@ class MediaProcessor:
             width=output_probe.media.width,
             height=output_probe.media.height,
             duration_ms=output_probe.media.duration_ms,
+        )
+
+    async def compress(
+        self,
+        input_path: Path,
+        job_dir: Path,
+        cancel_event: asyncio.Event,
+        progress_callback: ProgressCallback | None = None,
+    ) -> CompressionResult:
+        try:
+            async with asyncio.timeout(COMPRESSION_TIMEOUT_SECONDS):
+                return await self._compress(
+                    input_path,
+                    job_dir,
+                    cancel_event,
+                    progress_callback,
+                )
+        except TimeoutError as exc:
+            raise ProcessingError(
+                "PROCESSING_TIMEOUT",
+                "Compression exceeded its time limit",
+            ) from exc
+
+    async def _compress(
+        self,
+        input_path: Path,
+        job_dir: Path,
+        cancel_event: asyncio.Event,
+        progress_callback: ProgressCallback | None = None,
+    ) -> CompressionResult:
+        if progress_callback:
+            await progress_callback(JobProgressStage.INSPECTING, None)
+        source = await self._probe(input_path, cancel_event=cancel_event)
+        target = {
+            MediaClass.VIDEO: Target.VIDEO_MP4,
+            MediaClass.ANIMATION: Target.VIDEO_MP4,
+            MediaClass.IMAGE: Target.IMAGE_WEBP,
+            MediaClass.AUDIO: Target.AUDIO_M4A,
+        }[source.media.media_class]
+        attempts = self._compression_attempts(target)
+        self._validate_input(source, attempts[0])
+
+        retained: tuple[int, ConversionResult, Path] | None = None
+        retained_is_under_target = False
+        attempt_count = 0
+        for index, options in enumerate(attempts):
+            attempt_count = index + 1
+            if cancel_event.is_set():
+                raise ConversionCancelled
+            attempt_dir = job_dir / f"compression-{index + 1}"
+            attempt_dir.mkdir(mode=0o700)
+
+            async def report(
+                stage: JobProgressStage,
+                percent: int | None,
+                attempt_index: int = index,
+            ) -> None:
+                if not progress_callback or stage is not JobProgressStage.CONVERTING:
+                    return
+                completed = attempt_index / len(attempts)
+                current = (percent or 0) / 100 / len(attempts)
+                await progress_callback(
+                    JobProgressStage.CONVERTING,
+                    min(99, round((completed + current) * 100)),
+                )
+
+            try:
+                result = await self.convert(
+                    input_path,
+                    attempt_dir,
+                    options,
+                    cancel_event,
+                    report,
+                )
+            except ProcessingError:
+                await asyncio.to_thread(shutil.rmtree, attempt_dir, True)
+                continue
+
+            candidate = (result.output_bytes, result, attempt_dir)
+            if result.output_bytes <= COMPRESSION_AIM_BYTES:
+                if retained:
+                    await asyncio.to_thread(shutil.rmtree, retained[2], True)
+                retained = candidate
+                retained_is_under_target = True
+                break
+            if result.output_bytes < COMPRESSION_TARGET_BYTES:
+                if retained_is_under_target:
+                    await asyncio.to_thread(shutil.rmtree, attempt_dir, True)
+                else:
+                    if retained:
+                        await asyncio.to_thread(shutil.rmtree, retained[2], True)
+                    retained = candidate
+                    retained_is_under_target = True
+                continue
+            if retained_is_under_target:
+                await asyncio.to_thread(shutil.rmtree, attempt_dir, True)
+            elif retained is None or result.output_bytes < retained[0]:
+                if retained:
+                    await asyncio.to_thread(shutil.rmtree, retained[2], True)
+                retained = candidate
+            else:
+                await asyncio.to_thread(shutil.rmtree, attempt_dir, True)
+
+        if retained is None:
+            raise ProcessingError("COMPRESSION_FAILED", "The media could not be compressed")
+
+        output_bytes, result, attempt_dir = retained
+        final_path = job_dir / f"compressed.{TARGET_SPECS[target].extension}"
+        result.output_path.replace(final_path)
+        await asyncio.to_thread(shutil.rmtree, attempt_dir, True)
+        if progress_callback:
+            await progress_callback(JobProgressStage.VALIDATING, 100)
+        return CompressionResult(
+            input=source.media,
+            output_path=final_path,
+            output_bytes=output_bytes,
+            filename=f"compressed.{TARGET_SPECS[target].extension}",
+            media_type=result.media_type,
+            width=result.width,
+            height=result.height,
+            duration_ms=result.duration_ms,
+            compression=CompressionMetadata(
+                target_bytes=COMPRESSION_TARGET_BYTES,
+                aim_bytes=COMPRESSION_AIM_BYTES,
+                met_target=output_bytes < COMPRESSION_TARGET_BYTES,
+                attempts=attempt_count,
+                selected_target=target,
+            ),
+        )
+
+    @staticmethod
+    def _compression_attempts(target: Target) -> tuple[ConversionOptions, ...]:
+        if target is Target.VIDEO_MP4:
+            values = (
+                (50, Resolution.SOURCE),
+                (25, Resolution.SOURCE),
+                (0, Resolution.SOURCE),
+                (0, Resolution.P720),
+                (0, Resolution.P480),
+            )
+        elif target is Target.IMAGE_WEBP:
+            values = (
+                (50, Resolution.SOURCE),
+                (25, Resolution.SOURCE),
+                (0, Resolution.SOURCE),
+                (25, Resolution.P1080),
+                (0, Resolution.P720),
+            )
+        else:
+            values = (
+                (50, Resolution.SOURCE),
+                (25, Resolution.SOURCE),
+                (0, Resolution.SOURCE),
+            )
+        return tuple(
+            ConversionOptions(target=target, quality_percent=quality, resolution=resolution)
+            for quality, resolution in values
         )
 
     async def _probe(
@@ -587,6 +850,9 @@ class MediaProcessor:
             "-loglevel",
             "error",
             "-nostdin",
+            "-nostats",
+            "-progress",
+            "pipe:1",
             "-probesize",
             "33554432",
             "-analyzeduration",
@@ -641,9 +907,7 @@ class MediaProcessor:
 
         command.extend(["-vf", self._scale_filter(options.resolution, divisible_by_two=True)])
         if options.target is Target.VIDEO_MP4:
-            crf = {Quality.ECONOMY: "32", Quality.BALANCED: "26", Quality.HIGH: "20"}[
-                options.quality
-            ]
+            crf = str(self._quality_value(options, 32, 26, 20))
             command.extend(
                 [
                     "-c:v",
@@ -657,17 +921,11 @@ class MediaProcessor:
                 ]
             )
             if options.audio is AudioMode.KEEP and source.audio is not None:
-                bitrate = {
-                    Quality.ECONOMY: "96k",
-                    Quality.BALANCED: "160k",
-                    Quality.HIGH: "256k",
-                }[options.quality]
+                bitrate = f"{self._quality_value(options, 96, 160, 256)}k"
                 command.extend(["-c:a", "aac", "-b:a", bitrate])
             command.extend(["-movflags", "+faststart", "-f", "mp4"])
         else:
-            crf = {Quality.ECONOMY: "40", Quality.BALANCED: "32", Quality.HIGH: "24"}[
-                options.quality
-            ]
+            crf = str(self._quality_value(options, 40, 32, 24))
             command.extend(
                 [
                     "-c:v",
@@ -685,11 +943,7 @@ class MediaProcessor:
                 ]
             )
             if options.audio is AudioMode.KEEP and source.audio is not None:
-                bitrate = {
-                    Quality.ECONOMY: "64k",
-                    Quality.BALANCED: "128k",
-                    Quality.HIGH: "192k",
-                }[options.quality]
+                bitrate = f"{self._quality_value(options, 64, 128, 192)}k"
                 command.extend(["-c:a", "libopus", "-b:a", bitrate])
             command.extend(["-f", "webm"])
 
@@ -707,9 +961,7 @@ class MediaProcessor:
         command.extend(["-frames:v", "1"])
 
         if options.target is Target.IMAGE_JPEG:
-            quality = {Quality.ECONOMY: "8", Quality.BALANCED: "5", Quality.HIGH: "2"}[
-                options.quality
-            ]
+            quality = str(self._quality_value(options, 8, 5, 2))
             command.extend(
                 [
                     "-c:v",
@@ -723,14 +975,10 @@ class MediaProcessor:
                 ]
             )
         elif options.target is Target.IMAGE_PNG:
-            compression = {Quality.ECONOMY: "3", Quality.BALANCED: "6", Quality.HIGH: "9"}[
-                options.quality
-            ]
+            compression = str(self._quality_value(options, 3, 6, 9))
             command.extend(["-c:v", "png", "-compression_level", compression, "-f", "image2"])
         else:
-            quality = {Quality.ECONOMY: "60", Quality.BALANCED: "78", Quality.HIGH: "90"}[
-                options.quality
-            ]
+            quality = str(self._quality_value(options, 60, 78, 90))
             command.extend(
                 [
                     "-c:v",
@@ -753,11 +1001,8 @@ class MediaProcessor:
         options: ConversionOptions,
     ) -> None:
         assert source.video is not None
-        fps, colors = {
-            Quality.ECONOMY: (8, 64),
-            Quality.BALANCED: (12, 128),
-            Quality.HIGH: (15, 256),
-        }[options.quality]
+        fps = self._quality_value(options, 8, 12, 15)
+        colors = self._quality_value(options, 64, 128, 256)
         resolution = options.resolution
         if resolution is Resolution.SOURCE:
             scale = "scale=iw:ih"
@@ -778,21 +1023,13 @@ class MediaProcessor:
     ) -> None:
         assert source.audio is not None
         command.extend(["-map", f"0:{source.audio.index}", "-vn"])
-        bitrate = {
-            Quality.ECONOMY: "96k",
-            Quality.BALANCED: "160k",
-            Quality.HIGH: "256k",
-        }[options.quality]
+        bitrate = f"{self._quality_value(options, 96, 160, 256)}k"
         if options.target is Target.AUDIO_M4A:
             command.extend(["-c:a", "aac", "-b:a", bitrate, "-movflags", "+faststart", "-f", "mp4"])
         elif options.target is Target.AUDIO_MP3:
             command.extend(["-c:a", "libmp3lame", "-b:a", bitrate, "-f", "mp3"])
         else:
-            opus_bitrate = {
-                Quality.ECONOMY: "64k",
-                Quality.BALANCED: "128k",
-                Quality.HIGH: "192k",
-            }[options.quality]
+            opus_bitrate = f"{self._quality_value(options, 64, 128, 192)}k"
             command.extend(["-c:a", "libopus", "-b:a", opus_bitrate, "-f", "ogg"])
 
     @staticmethod
@@ -819,6 +1056,8 @@ class MediaProcessor:
         cancel_event: asyncio.Event | None = None,
         stdout_limit: int = 64 * 1024,
         stderr_limit: int = 64 * 1024,
+        progress_duration_ms: int | None = None,
+        progress_callback: ProgressCallback | None = None,
     ) -> CommandResult:
         process = await asyncio.create_subprocess_exec(
             *command,
@@ -830,7 +1069,17 @@ class MediaProcessor:
         assert process.stdout is not None
         assert process.stderr is not None
 
-        stdout_task = asyncio.create_task(self._capture(process.stdout, stdout_limit))
+        if progress_callback:
+            stdout_task = asyncio.create_task(
+                self._capture_progress(
+                    process.stdout,
+                    stdout_limit,
+                    progress_duration_ms,
+                    progress_callback,
+                )
+            )
+        else:
+            stdout_task = asyncio.create_task(self._capture(process.stdout, stdout_limit))
         stderr_task = asyncio.create_task(self._capture(process.stderr, stderr_limit))
         wait_task = asyncio.create_task(process.wait())
         cancel_task = asyncio.create_task(cancel_event.wait()) if cancel_event else None
@@ -867,6 +1116,47 @@ class MediaProcessor:
         if timed_out:
             raise _CommandTimeout
         return CommandResult(returncode=process.returncode or 0, stdout=stdout, stderr=stderr)
+
+    @staticmethod
+    async def _capture_progress(
+        stream: asyncio.StreamReader,
+        limit: int,
+        duration_ms: int | None,
+        callback: ProgressCallback,
+    ) -> bytes:
+        captured = bytearray()
+        last_percent = 0
+        while line := await stream.readline():
+            remaining = limit - len(captured)
+            if remaining > 0:
+                captured.extend(line[:remaining])
+            if not duration_ms or not line.startswith(b"out_time_us="):
+                continue
+            try:
+                elapsed_us = int(line.partition(b"=")[2])
+            except ValueError:
+                continue
+            percent = min(99, max(last_percent, elapsed_us * 100 // (duration_ms * 1000)))
+            if percent > last_percent:
+                last_percent = percent
+                await callback(JobProgressStage.CONVERTING, percent)
+        return bytes(captured)
+
+    @staticmethod
+    def _quality_value(
+        options: ConversionOptions,
+        economy: int,
+        balanced: int,
+        high: int,
+    ) -> int:
+        percent = options.quality_percent
+        if percent is None:
+            percent = {Quality.ECONOMY: 0, Quality.BALANCED: 50, Quality.HIGH: 100}[
+                options.quality
+            ]
+        if percent <= 50:
+            return math.floor(economy + (balanced - economy) * percent / 50 + 0.5)
+        return math.floor(balanced + (high - balanced) * (percent - 50) / 50 + 0.5)
 
     @staticmethod
     async def _capture(stream: asyncio.StreamReader, limit: int) -> bytes:

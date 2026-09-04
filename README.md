@@ -23,20 +23,21 @@ Media is treated as hostile input end to end: uploads are streamed to isolated j
 inspected by content rather than filename, converted through a fixed allowlisted FFmpeg surface,
 and re-probed before they can be downloaded. Every result expires automatically.
 
-> **Status** — Implemented and validated locally (unit, auth, integration, and in-container tests).
-> Not yet deployed to a production host, connected to a live Cloudflare Access application, or
-> authored and tested as an Apple Shortcut. See [deployment guide](docs/deployment.md) for the
-> exact gates.
+> **Status** — The current worktree is validated locally but not deployed. An
+> earlier revision is deployed behind Cloudflare Access; the new compression,
+> progress, PWA, and Shortcut behavior still requires production and Apple-device
+> validation. See [deployment guide](docs/deployment.md) for the exact gates.
 
 ## Highlights
 
 - **Preview before download** — the client sees the *exact* output byte count and decides whether to fetch it; nothing downloads by surprise.
 - **Fast web workflow** — drag in one file, get immediate local format detection and relevant presets, upload once, then keep or discard the exact server result.
-- **Closed preset surface** — three quality levels, six resolution caps, keep/drop audio. No codec names, filter strings, bitrates, or arbitrary FFmpeg flags are ever accepted from clients.
+- **Closed conversion surface** — bounded 0–100% format-relative quality, six resolution caps, and keep/drop audio. No codec names, filter strings, bitrates, or arbitrary FFmpeg flags are accepted from clients.
 - **Content-based input handling** — MIME type, extension, and original filename never select a parser. Inputs are demuxed through an explicit format allowlist with protocol whitelisting locked to `file`.
 - **Hard resource ceilings** — upload/output byte caps, wall-clock timeouts per media class, dimension/duration/FPS/pixel/stream limits, one conversion at a time, disk-space admission control.
 - **Origin-verified authentication** — Cloudflare Access JWTs are validated at the origin (signature, issuer, audience, expiry), so trust comes from cryptography, not forwarded headers.
 - **Disposable by design** — no database, no durable queue, no user data. A restart cancels jobs and wipes the workspace.
+- **Purpose-built compression** — one request automatically chooses MP4, WebP, or M4A and makes a bounded attempt to finish below 20 MB, reporting honestly when it cannot.
 
 ## Architecture
 
@@ -78,10 +79,11 @@ POST /v1/uploads       →  201  { id, offset, chunk_size }       # authenticate
 PATCH /v1/uploads/{id} →  200  { offset }                       # ordered raw chunks
 POST /v1/uploads/{id}/complete → 202                            # queue exact upload
 POST /v1/jobs          →  202  { id, state, status_url }        # small one-request clients
-GET  /v1/jobs/{id}     →  queued → processing → ready|failed   # poll
+GET  /v1/jobs/{id}     →  queued → inspect → convert → verify  # real progress
 GET  /v1/jobs/{id}/content                                    # only after you choose to
 DELETE /v1/jobs/{id}                                          # or let it expire
 GET  /v1/capabilities                                         # option set + limits
+POST /v1/compressions → GET /v1/compressions/{id}             # automatic <20 MB attempt
 ```
 
 <details>
@@ -93,6 +95,7 @@ GET  /v1/capabilities                                         # option set + lim
   "state": "ready",
   "target": "video-mp4",
   "quality": "balanced",
+  "quality_percent": 50,
   "resolution": "720p",
   "audio": "keep",
   "created_at": "2026-08-25T14:30:00Z",
@@ -110,14 +113,15 @@ GET  /v1/capabilities                                         # option set + lim
   },
   "output": {
     "bytes": 7131021,
-    "filename": "converted.mp4",
+    "filename": "holiday-converted.mp4",
     "media_type": "video/mp4",
     "download_url": "https://media.example.com/v1/jobs/82f353b4-33ec-41dd-8466-a1a0271e398f/content",
     "width": 1280,
     "height": 720,
     "duration_ms": 42100
   },
-  "error": null
+  "error": null,
+  "progress": null
 }
 ```
 
@@ -131,12 +135,12 @@ Every failure uses `{"error": {"code": "...", "message": "..."}}`. Codes are sta
 | Area | Codes |
 | --- | --- |
 | Browser security | `CROSS_SITE_REQUEST` |
-| Upload | `INPUT_TOO_LARGE`, `CHUNK_TOO_LARGE`, `EMPTY_INPUT`, `UPLOAD_TIMEOUT`, `UPLOAD_HEADER_REQUIRED`, `INVALID_UPLOAD_HEADER`, `UPLOAD_OFFSET_MISMATCH`, `UPLOAD_INCOMPLETE`, `UPLOAD_ALREADY_COMPLETED`, `CONTENT_LENGTH_MISMATCH`, `RAW_FILE_REQUIRED`, `UNSUPPORTED_ENCODING`, `INVALID_CONTENT_LENGTH`, `INSUFFICIENT_STORAGE` |
+| Upload | `INPUT_TOO_LARGE`, `CHUNK_TOO_LARGE`, `EMPTY_INPUT`, `UPLOAD_TIMEOUT`, `UPLOAD_HEADER_REQUIRED`, `INVALID_UPLOAD_HEADER`, `INVALID_FILENAME`, `UPLOAD_OFFSET_MISMATCH`, `UPLOAD_INCOMPLETE`, `UPLOAD_ALREADY_COMPLETED`, `CONTENT_LENGTH_MISMATCH`, `RAW_FILE_REQUIRED`, `UNSUPPORTED_ENCODING`, `INVALID_CONTENT_LENGTH`, `INSUFFICIENT_STORAGE` |
 | Options | `INVALID_OPTIONS` |
 | Capacity | `QUEUE_FULL` (with `Retry-After`) |
 | Authentication | `ACCESS_TOKEN_REQUIRED`, `INVALID_ACCESS_TOKEN` |
 | Media | `UNSUPPORTED_MEDIA`, `UNSUPPORTED_CONVERSION`, `MEDIA_LIMIT_EXCEEDED`, `MEDIA_PROBE_TIMEOUT` |
-| Processing | `PROCESSING_TIMEOUT`, `OUTPUT_TOO_LARGE`, `CONVERSION_FAILED` |
+| Processing | `PROCESSING_TIMEOUT`, `OUTPUT_TOO_LARGE`, `CONVERSION_FAILED`, `COMPRESSION_FAILED` |
 | Job state | `JOB_NOT_FOUND`, `JOB_NOT_READY`, `RESULT_EXPIRED` |
 
 Raw FFmpeg output is never returned to clients.
@@ -147,9 +151,18 @@ Raw FFmpeg output is never returned to clients.
 
 | Option | Values |
 | --- | --- |
-| `quality` | `economy` · `balanced` · `high` |
+| `quality_percent` | `0`–`100`; `50` exactly preserves the previous Balanced settings |
+| `quality` | Legacy compatibility: `economy` · `balanced` · `high` map to `0` · `50` · `100` |
 | `resolution` | `source` · `480p` · `720p` · `1080p` · `1440p` · `2160p` — a long-edge cap that never upscales |
 | `audio` | `keep` · `drop` — video targets only |
+
+Clients may send a percent-encoded original basename in `Upload-Filename`. It is
+used only to return `<stem>-converted.<target-extension>` and never selects a
+parser, codec, command, or filesystem path.
+
+`POST /v1/compressions` accepts no conversion options. It aims for 19,000,000
+bytes, reports success only below 20,000,000 bytes, and otherwise offers the
+smallest valid candidate. See [`docs/api.md`](docs/api.md).
 
 | Resource | Default limit |
 | --- | ---: |
@@ -194,7 +207,8 @@ What it does: starts the API on loopback with authentication disabled for local 
 never use this mode beyond your own machine.
 
 Open `http://127.0.0.1:8080` for the web interface. It uses no build step, external assets,
-trackers, or browser storage. File type and preview metadata are detected locally for speed;
+or trackers. Only an active post-upload job ID is kept in session storage for iOS recovery;
+file type and preview metadata are detected locally for speed;
 FFmpeg still verifies the uploaded contents before producing any result.
 
 **Checks:**
@@ -217,11 +231,15 @@ docker build --build-arg SOURCE_REVISION="$revision" --tag "media-manager:$revis
 
 What it does: builds the digest-pinned image from a clean commit and labels it with that revision.
 
-## iOS Shortcut
+## iPhone PWA and Shortcuts
 
-[`shortcuts/spec.md`](shortcuts/spec.md) is a credential-free, action-by-action native
-specification: Share Sheet intake, option menus, one upload, bounded polling, exact-size preview,
-cancel-before-download, save/share, and cleanup.
+The installable PWA provides safe-area-aware controls, resumable network uploads,
+recoverable post-upload polling, and native Share/Save handling. See
+[`docs/pwa.md`](docs/pwa.md).
+
+[`shortcuts/spec.md`](shortcuts/spec.md) defines two credential-free native
+automations: Convert Media asks only for the output format; Compress Media asks
+no conversion questions and naturally attempts to finish below 20 MB.
 
 Honest platform note: Apple has no supported way to create, sign, and silently install a
 Shortcut from Windows. The intended flow is authoring the graph once on an Apple device,
@@ -234,6 +252,10 @@ stays user-confirmed. [`shortcuts/tests/on-device.md`](shortcuts/tests/on-device
 | --- | --- |
 | [`docs/security.md`](docs/security.md) | Threat model, enforced invariants, container controls, residual risks, verification checklist |
 | [`docs/deployment.md`](docs/deployment.md) | Deployment guide: architecture, pre-deployment gates, validation matrix, rollback |
+| [`docs/api.md`](docs/api.md) | Conversion, resumable upload, compression, progress, filename, and lifecycle contracts |
+| [`docs/pwa.md`](docs/pwa.md) | iPhone interaction, recovery, update, sharing, and validation behavior |
+| [`docs/performance.md`](docs/performance.md) | Safe optimizations, benchmark evidence, and excluded trade-offs |
+| [`docs/history.md`](docs/history.md) | Date-addressable project activity and verification record |
 | [`shortcuts/README.md`](shortcuts/README.md) | Security model for tokens, authoring/export workflow, release gate |
 | [`docs`](docs/) · [`shortcuts`](shortcuts/) · [`tests`](tests/) | Everything above, plus the test suite |
 
