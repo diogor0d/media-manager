@@ -1,0 +1,8 @@
+#define name Compress Media
+#define inputs image, media, file
+#define from sharesheet
+#include 'setup.cherri'
+@resource = "compressions"
+@compress = true
+@createURL = "{baseURL}/v1/compressions"
+#include 'job.cherri'

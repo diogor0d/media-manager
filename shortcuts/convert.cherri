@@ -1,0 +1,28 @@
+#define name Convert Media
+#define inputs image, media, file
+#define from sharesheet
+#include 'setup.cherri'
+@resource = "jobs"
+@compress = false
+menu "Output format" {
+    item "MP4":
+        @target = "video-mp4"
+    item "WebM":
+        @target = "video-webm"
+    item "JPEG":
+        @target = "image-jpeg"
+    item "PNG":
+        @target = "image-png"
+    item "WebP":
+        @target = "image-webp"
+    item "GIF":
+        @target = "animation-gif"
+    item "M4A":
+        @target = "audio-m4a"
+    item "MP3":
+        @target = "audio-mp3"
+    item "Opus":
+        @target = "audio-opus"
+}
+@createURL = "{baseURL}/v1/jobs?target={@target}"
+#include 'job.cherri'

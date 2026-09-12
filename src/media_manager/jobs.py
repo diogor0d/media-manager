@@ -135,14 +135,26 @@ class JobManager:
         expected_input_bytes: int | None = None,
         source_filename: str | None = None,
     ) -> JobRecord:
+        evicted: JobRecord | None = None
         async with self._lock:
             if len(self._jobs) >= self._settings.max_live_jobs:
-                raise ApiError(
-                    429,
-                    "QUEUE_FULL",
-                    "The conversion queue is full",
-                    headers={"Retry-After": "10"},
+                evicted = min(
+                    (
+                        job
+                        for job in self._jobs.values()
+                        if job.principal_id == principal_id
+                        and job.state in (JobState.READY, JobState.FAILED)
+                    ),
+                    key=lambda job: job.created_at,
+                    default=None,
                 )
+                if evicted is None:
+                    raise ApiError(
+                        429,
+                        "QUEUE_FULL",
+                        "The conversion queue is full",
+                        headers={"Retry-After": "10"},
+                    )
 
             output_slots = 2 if options is None else 1
             required = self._settings.max_upload_bytes + (
@@ -185,8 +197,13 @@ class JobManager:
                 expires_at=datetime.now(UTC)
                 + timedelta(seconds=self._settings.upload_session_ttl_seconds),
             )
+            if evicted is not None:
+                self._jobs.pop(evicted.id)
+                evicted.cancel_event.set()
             self._jobs[job_id] = job
-            return job
+        if evicted is not None:
+            await self._remove_record_directory(evicted)
+        return job
 
     async def reserve_compression(
         self,

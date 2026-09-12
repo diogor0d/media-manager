@@ -1,0 +1,48 @@
+#include 'actions/web'
+#include 'actions/documents'
+#include 'actions/photos'
+#include 'actions/sharing'
+#include 'actions/text'
+#question apiQuestion "API Base URL (HTTPS origin, no trailing slash)" ""
+#question idQuestion "Access Client ID (per-device service token)" ""
+#question secretQuestion "Access Client Secret" ""
+const baseURL = text(apiQuestion)
+const clientID = text(idQuestion)
+const clientSecret = text(secretQuestion)
+// Restrict authority syntax before any credential-bearing request.
+const validOrigin = matchText('\Ahttps://[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?(?::[0-9]{1,5})?\z', baseURL)
+if !validOrigin {
+    alert("Use an HTTPS DNS or IPv4 origin only, without path or trailing slash.")
+    stop()
+}
+const portValue = getURLDetail(baseURL, "Port")
+if portValue {
+    if portValue.number < 1 || portValue.number > 65535 {
+        alert("Invalid API port.")
+        stop()
+    }
+}
+// The anchored allowlist already excludes userinfo, paths, queries and fragments.
+// Avoid coercing absent URL components through Text actions for validation.
+const validClientID = matchText('^\S+$', clientID)
+const validClientSecret = matchText('^\S+$', clientSecret)
+if !validClientID || !validClientSecret {
+    alert("Fill in both Access service-token fields without whitespace.")
+    stop()
+}
+@inputFile = ShortcutInput
+if !@inputFile {
+    menu "Choose media from" {
+        item "Photos":
+            @inputFile = selectPhotos(false)
+        item "Files":
+            @inputFile = selectFile(false)
+    }
+}
+const inputCount = count(@inputFile)
+if inputCount != 1 {
+    alert("Select exactly one file.")
+    stop()
+}
+const inputName = getFileDetail(@inputFile, "Name")
+const uploadFilename = urlEncode("{inputName}")

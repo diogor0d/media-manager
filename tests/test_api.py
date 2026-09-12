@@ -1072,6 +1072,60 @@ async def test_queue_capacity_rejects_an_additional_live_job(tmp_path: Path) -> 
         assert list(settings.work_dir.iterdir()) == []
 
 
+async def test_new_job_replaces_same_principal_terminal_job_at_capacity(
+    tmp_path: Path,
+) -> None:
+    settings = make_settings(tmp_path, max_live_jobs=1)
+    processor = FakeProcessor()
+    app = create_app(settings, processor=processor)
+
+    async def principal_from_header(request: Request) -> Principal:
+        return Principal(id=f"test:{request.headers['X-Test-Principal']}")
+
+    app.dependency_overrides[get_principal] = principal_from_header
+    owner_headers = {"X-Test-Principal": "owner"}
+    other_headers = {"X-Test-Principal": "other"}
+
+    async with running_client(app) as client:
+        first = await client.post(
+            "/v1/jobs",
+            params={"target": "video-mp4"},
+            content=SOURCE_CONTENT,
+            headers=owner_headers,
+        )
+        assert first.status_code == 202
+        first_job_id = first.json()["id"]
+        await wait_for_state(client, first_job_id, "ready", headers=owner_headers)
+
+        other = await client.post(
+            "/v1/jobs",
+            params={"target": "video-mp4"},
+            content=b"other-principal-source",
+            headers=other_headers,
+        )
+        assert_error(other, 429, "QUEUE_FULL", "The conversion queue is full")
+
+        second = await client.post(
+            "/v1/jobs",
+            params={"target": "video-mp4"},
+            content=b"replacement-source",
+            headers=owner_headers,
+        )
+
+        assert second.status_code == 202
+        assert_error(
+            await client.get(f"/v1/jobs/{first_job_id}", headers=owner_headers),
+            404,
+            "JOB_NOT_FOUND",
+            "Job was not found",
+        )
+        assert not (settings.work_dir / first_job_id).exists()
+        second_job_id = second.json()["id"]
+        await wait_for_state(client, second_job_id, "ready", headers=owner_headers)
+        deleted = await client.delete(f"/v1/jobs/{second_job_id}", headers=owner_headers)
+        assert deleted.status_code == 204
+
+
 async def test_unhandled_processing_failure_returns_only_a_safe_error(tmp_path: Path) -> None:
     secret = "private-ffmpeg-command-and-token"
     settings = make_settings(tmp_path)

@@ -28,9 +28,10 @@ as `API Base URL`. HTTPS alone is insufficient. Reject redirects or returned
 URLs to any other origin.
 
 Configure both Shortcuts for the Share Sheet with Images, Media, and Files. If
-there is no Shortcut Input, use `Select File`; otherwise require exactly one
-input item. Use `Get Details of Files` to obtain its name, then URL-encode that
-name as `Upload Filename`.
+there is no Shortcut Input, show a source menu with `Photos` first and `Files`
+second, then use the corresponding native single-item picker. Otherwise require
+exactly one input item. Use `Get Details of Files` to obtain its name, then
+URL-encode that name as `Upload Filename`.
 
 ## Convert Media
 
@@ -54,7 +55,8 @@ resolution defaults to source, and sound is kept when the target supports it.
 ### Action Graph
 
 1. Read and validate the three configuration values.
-2. Resolve exactly one input file from Shortcut Input or `Select File`.
+2. Resolve exactly one input file from Shortcut Input or the Photos/Files source
+   menu.
 3. Read and URL-encode the input filename.
 4. Use `Choose from Menu` once to set `Target` from the table above.
 5. Build `API Base URL/v1/jobs?target=Target` with magic variables.
@@ -70,14 +72,14 @@ resolution defaults to source, and sound is kept when the target supports it.
    and stop.
 10. On timeout or malformed data, request `DELETE status_url` when available and
     stop.
-11. On `ready`, require `input.bytes`, `output.bytes`, `output.filename`, and an
-    same-origin HTTPS `output.download_url`. Show input size, output size, and the measured
-    difference before downloading.
+11. On `ready`, require `input.bytes`, `output.bytes`, `output.filename`, and a
+    same-origin HTTPS `output.download_url`. Show decimal MB input/output sizes
+    and the signed size change in MB and percent before downloading.
 12. Ask `Keep this result?`. If no, request `DELETE status_url` and stop.
-13. Fetch `output.download_url` with both Access headers, then immediately
-    request `DELETE status_url`.
-14. Apply `output.filename` with `Set Name` and use `Share`. The native share
-    sheet includes Save to Files.
+13. After a short handoff delay, fetch `output.download_url` with both Access
+    headers and apply `output.filename` with `Set Name` to materialize the file.
+14. Request `DELETE status_url`, then use `Share`. The native share sheet
+    includes Save to Files.
 
 The API validates source/target compatibility. A video cannot become a still
 image and an image cannot become audio merely because a menu value was chosen.

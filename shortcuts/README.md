@@ -1,29 +1,44 @@
 # Media Manager iOS Shortcuts
 
-This directory defines a credential-free development and distribution package
-for two native iOS Shortcuts: `Convert Media` and `Compress Media`.
-It deliberately contains no API hostname, service-token value, Apple account
-data, iCloud link, or signed `.shortcut` binary.
+This directory contains credential-free generated implementations of two native
+iOS Shortcuts: `Convert Media` and `Compress Media`. It deliberately contains no
+API hostname, service-token value, Apple account data, iCloud link, or signed
+`.shortcut` binary.
 
-The authoritative implementation is the action-by-action native specification
-in [`spec.md`](spec.md). It is intended to be authored once in Apple's
-Shortcuts app and then exported for users. Recipients do not need to recreate
-the actions.
+The behavior contract remains [`spec.md`](spec.md). The checked-in Cherri source
+compiles that contract to unsigned Apple Shortcut property lists. The generated
+artifacts have passed structural checks and Apple signing/import was proven with
+a minimal setup-question probe, but the complete workflows still require the
+on-device release gate.
 
 ## Package contents
+
+The current artifacts are diagnostic builds: after uploading they show a local
+Quick Look preview of the actual POST response before parsing it, and polling
+timeouts use the `Media Manager: Polling Diagnostic v2` title. Do not publish
+the raw preview or screenshots that could contain sensitive response details.
+Close the preview to continue. Remove these diagnostics after polling succeeds;
+these are not validated release artifacts.
 
 - `README.md`: security model and platform-specific development and release
   workflow.
 - `spec.md`: exact behavior and API mapping for both Shortcuts.
+- `convert.cherri` and `compress.cherri`: top-level Cherri 2.3.0 sources.
+- `setup.cherri` and `job.cherri`: shared native-action source.
+- `finalize.py`: fixes known Cherri 2.3.0 import-question and raw-action output
+  defects, then validates references and credential-bearing HTTP actions.
+- `Convert Media_unsigned.shortcut` and `Compress Media_unsigned.shortcut`:
+  generated credential-free artifacts ready for Apple signing.
+- `sign-on-mac.sh`: signs both artifacts locally using Apple's `shortcuts`
+  command, without a third-party signing fallback.
 - `tests/on-device.md`: release-gating tests that require an Apple device and a
   test API deployment.
 
-No declarative source is included. A third-party generator can produce an
-unsigned Shortcut representation on Windows, but that representation and its
-compatibility with the current Shortcuts app could not be validated here.
-Apple's supported signing tooling is only available on macOS and is documented
-for previously exported shortcuts. The native specification is therefore more
-truthful and supportable than unverified generated source.
+Cherri is a third-party compiler and its output format is not an Apple-supported
+source format. Version 2.3.0 is pinned for this release. Do not let Cherri sign
+these artifacts automatically: if local signing fails, Cherri can fall back to
+a remote service. Compile with `--skip-sign`, run `finalize.py`, and invoke
+Apple's `shortcuts sign` explicitly as described below.
 
 ## Security model
 
@@ -83,21 +98,24 @@ Contents of URL` action in the master. Search visually for the real hostname,
 client ID, and client secret. Then import the release artifact on a clean test
 device and confirm all three setup questions are blank.
 
-## Windows-automatable work
+## Generation
 
-Windows can be used for the following repository and release preparation:
+The current artifacts were compiled with Cherri 2.3.0 using:
 
-- Maintain and review this specification and test plan.
-- Compare the native Shortcut against the numbered action sequence during a
-  screen-sharing or review session.
-- Record a release version, tested OS versions, and the checksum of an artifact
-  that was exported on a Mac.
-- Publish an already Apple-exported artifact or an already-created iCloud link
-  through the chosen release channel.
+```text
+cherri convert.cherri --skip-sign
+cherri compress.cherri --skip-sign
+python3 finalize.py "Convert Media_unsigned.shortcut" "Compress Media_unsigned.shortcut"
+```
 
-Windows cannot perform these official Apple steps:
+`finalize.py` requires all three setup defaults to be blank, checks setup action
+indices, converts the Cherri raw upload placeholder to the native Get Contents
+of URL identifier, requires explicit token-string inputs in Match Text's `text`
+parameter, and validates file-body, header, URL-variable, cleanup, and
+output references. It never signs or adds configuration values.
 
-- Create the native action graph through an Apple-supported command-line tool.
+Windows still cannot perform these Apple-specific steps:
+
 - Sign a Shortcut using Apple's `shortcuts` command.
 - Validate Share Sheet, upload, polling, save, or share behavior on iOS.
 - Silently install a Shortcut on a recipient's device.
@@ -105,53 +123,40 @@ Windows cannot perform these official Apple steps:
   device.
 
 Do not use a remote third-party signing service for a Shortcut that contains a
-hostname or credentials. This package does not require one.
+hostname or credentials. The checked-in unsigned artifacts contain neither.
 
-## Native authoring workflow
+## Mac signing
 
-1. On a current iPhone, iPad, or Mac, create `Convert Media - Master` and
-   `Compress Media - Master` in the Shortcuts app.
-2. Implement the two graphs in [`spec.md`](spec.md), including blank setup
-   questions, bounded polling, confirmation, and cleanup branches.
-3. Keep all three configuration `Text` actions blank in the master.
-4. Duplicate both masters as matching `- Test` copies.
-5. Populate only the test copy with a disposable per-device token and test API
-   base URL.
-6. Complete every applicable case in [`tests/on-device.md`](tests/on-device.md).
-7. Apply tested fixes to the blank master without copying configuration values
-   from the test copy.
-
-The Shortcut uses native actions only and requires no companion scripting app.
-
-## Mac export and signing
-
-The preferred file release is an export performed by the Shortcuts app on a
-Mac:
-
-1. Open the credential-free master.
-2. Confirm its setup questions have blank defaults.
-3. Choose `File > Export`.
-4. Select `Anyone` for a generally distributable file.
-5. Save the exported `.shortcut` file outside this repository until its clean
-   import has been verified.
-6. Import it on a clean Apple device, answer with disposable test values, and
-   run the release tests.
-
-Apple receives a copy for validation when exporting for `Anyone`. That process
-protects the distributed file against modification; it is not an audit of the
-Shortcut's behavior or credential handling.
-
-If a previously exported file must be signed again, macOS provides:
+Transfer this directory to the Mac, open Terminal, and run:
 
 ```text
-shortcuts sign --mode anyone --input "Media Manager.exported.shortcut" --output "Media Manager.shortcut"
+bash "/path/to/media-manager/shortcuts/sign-on-mac.sh"
 ```
 
-What it does: asks Apple's macOS Shortcuts tooling to validate and sign a
-previously exported Shortcut for import by anyone.
+The script validates both unsigned plists, sends each credential-free artifact
+to Apple for `anyone` signing, and opens
+`~/Downloads/media-manager-shortcuts`. It overwrites only same-named signed
+outputs in that dedicated directory. It does not invoke Cherri or any
+third-party signing service.
 
-Do not claim that the command is available on Windows or that it officially
-accepts arbitrary files produced by external generators.
+Double-click each signed file and answer its three setup questions. Use the
+actual API origin and a disposable per-device service token only in the installed
+test copy, then complete [`tests/on-device.md`](tests/on-device.md).
+
+The installed Shortcuts use native actions only and require no companion app.
+
+## Manual signing
+
+The script is equivalent to:
+
+```text
+shortcuts sign --mode anyone --input "Convert Media_unsigned.shortcut" --output "Convert Media.shortcut"
+shortcuts sign --mode anyone --input "Compress Media_unsigned.shortcut" --output "Compress Media.shortcut"
+```
+
+Apple receives each credential-free artifact for validation. Signing protects
+the distributed file against later modification; it is not an audit of the
+workflow's behavior or credential handling.
 
 ## iCloud-link distribution
 

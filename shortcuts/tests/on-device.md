@@ -47,9 +47,11 @@ values, private media, or a private iCloud link in test evidence.
 ## Input and Delivery
 
 - [ ] Share Sheet input works for one image, video, audio item, and Files item.
-- [ ] Running directly opens Select File.
+- [ ] Running directly offers Photos first and Files second; each picker returns
+  exactly one usable item.
 - [ ] Zero, cancelled, and multiple inputs do not create a job.
-- [ ] Ready preview appears before download and shows exact server byte counts.
+- [ ] Ready preview appears before download and shows readable decimal MB sizes
+  plus the correct signed MB and percentage change.
 - [ ] Discard performs no content download.
 - [ ] Keep downloads once, deletes the job, applies the API filename, and opens
   the native share sheet.
