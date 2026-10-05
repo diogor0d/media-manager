@@ -159,6 +159,36 @@ async def test_every_advertised_target_converts_with_the_runtime_ffmpeg(tmp_path
         assert progress[-1] == (JobProgressStage.VALIDATING, 100)
 
 
+async def test_gif_accepts_still_images_and_short_animations(tmp_path: Path) -> None:
+    ffmpeg = _tool("ffmpeg")
+    ffprobe = _tool("ffprobe")
+    fixtures = _generate_fixtures(tmp_path, ffmpeg)
+    animation = tmp_path / "two-frame.gif"
+    subprocess.run(
+        [ffmpeg, "-hide_banner", "-loglevel", "error", "-i", str(fixtures["video"]),
+         "-frames:v", "2", "-an", str(animation)],
+        check=True, capture_output=True,
+    )
+    processor = MediaProcessor(Settings(
+        work_dir=tmp_path / "work", auth_mode=AuthMode.DISABLED,
+        ffmpeg_path=ffmpeg, ffprobe_path=ffprobe, probe_timeout_seconds=10,
+    ))
+    for index, (source, target) in enumerate((
+        (fixtures["image"], Target.ANIMATION_GIF),
+        (animation, Target.ANIMATION_GIF),
+        (animation, Target.VIDEO_MP4),
+        (animation, Target.VIDEO_WEBM),
+    )):
+        job_dir = tmp_path / f"gif-input-{index}"
+        job_dir.mkdir()
+        result = await processor.convert(
+            source, job_dir, ConversionOptions(target=target), asyncio.Event(),
+        )
+        assert result.output_path.is_file()
+        assert result.output_bytes == result.output_path.stat().st_size
+        assert result.output_bytes > 0
+
+
 async def test_quality_percentage_preserves_legacy_anchors_and_is_monotonic() -> None:
     anchors = [
         (32, 26, 20, False),

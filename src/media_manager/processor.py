@@ -688,6 +688,15 @@ class MediaProcessor:
             codec_type = str(item.get("codec_type", ""))
             codec_name = str(item.get("codec_name", ""))
             disposition = item.get("disposition") or {}
+            average_rate = self._fraction(item.get("avg_frame_rate"))
+            nominal_rate = self._fraction(item.get("r_frame_rate"))
+            # GIF timestamps use hundredths of a second. FFprobe can report that
+            # 100 Hz timebase as r_frame_rate even for a 10 FPS animation.
+            gif_rate = (
+                codec_name == "gif"
+                and raw_format.get("format_name") == "gif"
+                and average_rate > 0
+            )
             stream = StreamInfo(
                 index=int(item["index"]),
                 codec_type=codec_type,
@@ -695,10 +704,7 @@ class MediaProcessor:
                 width=self._optional_int(item.get("width")),
                 height=self._optional_int(item.get("height")),
                 duration=self._optional_float(item.get("duration")),
-                frame_rate=max(
-                    self._fraction(item.get("avg_frame_rate")),
-                    self._fraction(item.get("r_frame_rate")),
-                ),
+                frame_rate=average_rate if gif_rate else max(average_rate, nominal_rate),
                 channels=self._optional_int(item.get("channels")),
                 sample_rate=self._optional_int(item.get("sample_rate")),
                 attached_picture=bool(disposition.get("attached_pic", 0)),
@@ -1008,8 +1014,11 @@ class MediaProcessor:
             scale = "scale=iw:ih"
         else:
             scale = self._scale_filter(resolution, divisible_by_two=False)
+        # A still image has one frame; resampling its short nominal duration can
+        # discard that frame entirely. Frame-rate conversion applies to motion.
+        frame_filter = "" if source.media.media_class is MediaClass.IMAGE else f"fps={fps},"
         graph = (
-            f"[0:{source.video.index}]fps={fps},{scale}:flags=lanczos,split=2[g0][g1];"
+            f"[0:{source.video.index}]{frame_filter}{scale}:flags=lanczos,split=2[g0][g1];"
             f"[g0]palettegen=max_colors={colors}:stats_mode=diff[p];"
             "[g1][p]paletteuse=dither=sierra2_4a[gif]"
         )
