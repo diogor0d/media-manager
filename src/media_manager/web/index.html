@@ -3,7 +3,9 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <meta name="theme-color" content="#0a0f12">
+  <meta name="theme-color" content="#eef2fb" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#111729" media="(prefers-color-scheme: dark)">
+  <meta name="color-scheme" content="light dark">
   <meta name="description" content="Fast, private media conversion on your own server.">
   <meta name="format-detection" content="telephone=no">
   <meta name="apple-mobile-web-app-capable" content="yes">
@@ -13,34 +15,48 @@
   <link rel="icon" href="/favicon.svg" type="image/svg+xml">
   <link rel="apple-touch-icon" href="/assets/apple-touch-icon.png">
   <link rel="manifest" href="/manifest.webmanifest">
-  <link rel="stylesheet" href="/assets/app.css?v=pwa3">
-  <script src="/assets/app.js?v=pwa3" defer></script>
+  <link rel="stylesheet" href="/assets/app.css?v=history1">
+  <script src="/assets/app.js?v=history1" defer></script>
 </head>
 <body>
   <header class="masthead">
     <a class="brand" href="/" aria-label="Media Manager home">
-      <img src="/assets/logo.svg" alt="Media Manager" width="248" height="48">
+      <img src="/favicon.svg" alt="" width="36" height="36">
+      <span>Media Manager</span>
+      <span class="brand-label">Converter</span>
     </a>
-    <p id="connection-status" class="service-note"><span aria-hidden="true"></span>Private conversion bench</p>
+    <p id="connection-status" class="service-note" hidden role="status"><span aria-hidden="true"></span>Offline · conversion paused</p>
   </header>
 
   <main>
     <section class="intro" aria-labelledby="page-title">
-      <p class="eyebrow">ONE FILE · ONE UPLOAD · NO HISTORY</p>
-      <h1 id="page-title">Change the format.<br><em>Keep the decision.</em></h1>
-      <p>Inspect a file locally, choose a precise output, then download only when the result is worth keeping.</p>
+      <h1 id="page-title">Convert media</h1>
+      <button id="history-button" class="secondary-action" type="button" aria-expanded="false" aria-controls="history-panel">History</button>
     </section>
 
     <section class="bench" aria-label="Media conversion">
-      <div id="drop-zone" class="drop-zone" tabindex="0" role="button" aria-controls="file-input" data-view-focus>
+      <div id="drop-zone" class="drop-zone" tabindex="0" role="button" aria-label="Choose a media file or drop one here" aria-controls="file-input" data-view-focus>
         <input id="file-input" type="file" accept="image/*,video/*,audio/*" hidden>
-        <div class="drop-mark" aria-hidden="true"><span></span><i></i></div>
-        <div class="drop-prompt">
-          <p class="drop-title">Drop one media file</p>
-          <p class="drop-copy">or <span>choose from this device</span></p>
+        <div class="media-sculpture" aria-hidden="true">
+          <div class="media-tile tile-audio"><svg viewBox="0 0 48 48" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 33V13l18-4v20M20 19l18-4"/><ellipse cx="14" cy="34" rx="6" ry="5"/><ellipse cx="32" cy="30" rx="6" ry="5"/></svg></div>
+          <div class="media-tile tile-image"><svg viewBox="0 0 48 48" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><rect x="6" y="8" width="36" height="32" rx="6"/><circle cx="17" cy="18" r="3"/><path d="m7 33 10-9 8 7 6-5 10 9"/></svg></div>
+          <div class="media-tile tile-video"><svg viewBox="0 0 48 48" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linejoin="round"><rect x="6" y="8" width="36" height="32" rx="6"/><path d="m20 17 12 7-12 7Z"/></svg></div>
         </div>
+        <div class="drop-prompt">
+          <p class="drop-title">Drop a file here</p>
+          <p class="drop-copy">or choose one from your device</p>
+          <span class="choose-file">Choose a file <svg aria-hidden="true" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 10h12m-5-5 5 5-5 5"/></svg></span>
+        </div>
+        <p class="supported-copy">Images <span>·</span> Video <span>·</span> Audio</p>
         <p id="limit-copy" class="limit-copy">Loading server limit…</p>
       </div>
+
+      <aside id="format-guide" class="format-guide" aria-labelledby="formats-title">
+        <div class="section-label"><span id="formats-title">Output formats</span><small>Select a format to choose a file</small></div>
+        <section aria-labelledby="image-formats-title"><h2 id="image-formats-title">Images</h2><div id="image-presets" class="format-presets"></div></section>
+        <section aria-labelledby="video-formats-title"><h2 id="video-formats-title">Video &amp; animation</h2><div id="video-presets" class="format-presets"></div></section>
+        <section aria-labelledby="audio-formats-title"><h2 id="audio-formats-title">Audio</h2><div id="audio-presets" class="format-presets"></div></section>
+      </aside>
 
       <div id="workspace" class="workspace" hidden>
         <article class="source-panel" data-view-focus tabindex="-1">
@@ -53,10 +69,10 @@
             <div id="dimensions-fact" hidden><dt>Frame</dt><dd id="file-dimensions"></dd></div>
             <div id="duration-fact" hidden><dt>Length</dt><dd id="file-duration"></dd></div>
           </dl>
-          <p class="provisional">Local detection. The server verifies file contents during conversion.</p>
+          <p class="provisional">Local preview. Uploaded when you convert.</p>
         </article>
 
-        <div id="aperture" class="aperture" aria-hidden="true"><span></span><i></i><b></b></div>
+        <div id="aperture" class="aperture" aria-hidden="true">→</div>
 
         <form id="conversion-form" class="output-panel">
           <div class="section-label"><span>Output</span><small id="target-count"></small></div>
@@ -112,7 +128,7 @@
 
       <div id="result-view" class="result-view" hidden data-view-focus tabindex="-1">
         <p class="ready-label"><span aria-hidden="true"></span>Ready</p>
-        <h2>The result is yours to judge.</h2>
+        <h2>Conversion complete</h2>
         <div class="receipt">
           <div><span>Input</span><strong id="result-input-size"></strong><small id="result-input-meta"></small></div>
           <div class="receipt-arrow" aria-hidden="true">→</div>
@@ -125,6 +141,7 @@
           <a id="download-button" class="secondary-action" href="#" download>Open <strong id="download-extension"></strong></a>
           <button id="discard-button" class="secondary-action" type="button">Discard result</button>
         </div>
+        <button id="another-button" class="text-action" type="button">Convert another file</button>
       </div>
 
       <div id="error-view" class="error-view" role="alert" hidden data-view-focus tabindex="-1">
@@ -133,6 +150,25 @@
         <p id="error-detail"></p>
         <button id="try-again-button" class="secondary-action" type="button">Choose another file</button>
       </div>
+    </section>
+
+    <section id="history-panel" class="history-panel" hidden aria-labelledby="history-title">
+      <div class="history-heading">
+        <h2 id="history-title" tabindex="-1">History</h2>
+        <button id="history-refresh" class="secondary-action" type="button">Refresh</button>
+      </div>
+      <form id="history-settings" class="history-settings">
+        <label for="retention-days">Keep results for</label>
+        <div class="retention-controls">
+          <input id="retention-days" type="number" min="1" max="90" step="1" required value="7" aria-describedby="retention-note">
+          <span>days</span>
+          <button id="retention-save" class="secondary-action" type="submit">Save</button>
+        </div>
+        <p id="retention-note">1–90 days. Applies to new results.</p>
+      </form>
+      <p id="history-message" class="history-message" role="status" aria-live="polite"></p>
+      <ul id="history-list" class="history-list" aria-label="Saved results"></ul>
+      <button id="history-more" class="secondary-action" type="button" hidden>Show more</button>
     </section>
 
     <p id="live-status" class="sr-only" aria-live="polite"></p>
@@ -144,8 +180,6 @@
   </aside>
 
   <footer>
-    <p>Files are processed as disposable jobs and removed automatically.</p>
-    <p>No trackers · no media stored in this browser</p>
     <p id="install-hint" class="install-hint" hidden>Install: Share → Add to Home Screen</p>
   </footer>
 </body>

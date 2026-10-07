@@ -26,6 +26,8 @@ from media_manager.models import (
     ConversionOptions,
     ErrorBody,
     ErrorResponse,
+    HistoryEntry,
+    HistorySettings,
     JobView,
     Quality,
     QualityScale,
@@ -191,7 +193,7 @@ def create_app(
         return JSONResponse(content=app.openapi())
 
     @app.get("/v1/capabilities", response_model=Capabilities)
-    async def capabilities(_principal: PrincipalDependency) -> Capabilities:
+    async def capabilities(principal: PrincipalDependency) -> Capabilities:
         return Capabilities(
             targets=target_capabilities(),
             qualities=[
@@ -217,9 +219,51 @@ def create_app(
                 resolved_settings.max_chunk_bytes,
                 resolved_settings.max_upload_bytes,
             ),
-            result_ttl_seconds=resolved_settings.result_ttl_seconds,
+            result_ttl_seconds=manager.retention_seconds(principal.id),
             compression_target_bytes=COMPRESSION_TARGET_BYTES,
         )
+
+    @app.get(
+        "/v1/history/settings",
+        response_model=HistorySettings,
+        responses={401: {"model": ErrorResponse}},
+    )
+    async def get_history_settings(principal: PrincipalDependency) -> HistorySettings:
+        return HistorySettings(
+            retention_days=await manager.get_retention_days(principal.id),
+        )
+
+    @app.put(
+        "/v1/history/settings",
+        response_model=HistorySettings,
+        responses={
+            401: {"model": ErrorResponse},
+            422: {"model": ErrorResponse},
+            507: {"model": ErrorResponse},
+        },
+    )
+    async def put_history_settings(
+        settings_body: HistorySettings,
+        principal: PrincipalDependency,
+    ) -> HistorySettings:
+        retention_days = await manager.set_retention_days(
+            principal.id,
+            settings_body.retention_days,
+        )
+        return HistorySettings(retention_days=retention_days)
+
+    @app.get(
+        "/v1/history",
+        response_model=dict[str, list[HistoryEntry] | int],
+        responses={401: {"model": ErrorResponse}},
+    )
+    async def get_history(
+        principal: PrincipalDependency,
+        limit: int = Query(default=50, ge=1, le=100),
+        offset: int = Query(default=0, ge=0),
+    ) -> dict[str, list[HistoryEntry] | int]:
+        items, total = await manager.history(principal.id, limit, offset)
+        return {"items": items, "total": total}
 
     @app.post(
         "/v1/uploads",

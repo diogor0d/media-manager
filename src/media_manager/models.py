@@ -2,8 +2,9 @@ from __future__ import annotations
 
 from datetime import datetime
 from enum import StrEnum
+from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, StrictInt
 
 
 class Target(StrEnum):
@@ -200,3 +201,15 @@ class UploadView(BaseModel):
     chunk_size: int = Field(gt=0)
     upload_url: str
     expires_at: datetime
+
+
+class HistorySettings(BaseModel):
+    retention_days: StrictInt = Field(ge=1, le=90)
+
+
+class HistoryEntry(BaseModel):
+    id: str
+    kind: Literal["conversion", "compression"]
+    source_filename: str | None = None
+    completed_at: datetime
+    job: JobView | CompressionJobView

@@ -37,7 +37,7 @@ other Docker or host processes that do not have a valid Access assertion.
   re-encoded; stream copy is never used.
 - Source metadata, chapters, subtitles, data streams, and attachments are not
   retained. An optional sanitized source basename is retained only with the
-  disposable in-memory job to produce a `-converted` or `-compressed` result name.
+  expiring private history record to produce a `-converted` or `-compressed` result name.
 - Completed output is probed again and its container, codec, stream count, and
   byte size are validated before it becomes downloadable.
 - Input and partial files are removed on completion, rejection, cancellation,
@@ -53,7 +53,9 @@ default seccomp profile, bounded PIDs/logs/files, two CPUs, 2 GiB RAM with no
 additional swap allowance, a small no-exec `/tmp`, and a single worker.
 
 The host publication is IPv4 loopback only. No Docker socket, host namespace,
-device, persistent user data, database, broker, or privileged helper is present.
+device, database, broker, or privileged helper is present. The private work bind
+stores expiring outputs and minimal job metadata, plus per-principal retention
+preferences. History and settings use the same verified principal boundary as jobs.
 Outbound HTTPS remains available because Access signing keys must be refreshed.
 
 ## Residual risk
@@ -66,7 +68,9 @@ Outbound HTTPS remains available because Access signing keys must be refreshed.
   conversion in a separate no-network worker sandbox or VM.
 - The host work directory may have no hard quota. One live job can
   reserve up to 5 GiB of input and 5 GiB of output, so production still needs
-  at least 10 GiB plus operational headroom, capacity verification, and alerts.
+  at least 10 GiB plus operational headroom, retained history capacity, capacity
+  verification, and alerts. History consumes disk until deletion or expiry; disk
+  admission rejects new jobs when the required headroom is unavailable.
 - Browser uploads are split into 50 MiB requests because Cloudflare rejects a
   5 GiB request body. Every session and chunk remains bound to the independently
   verified Access principal; offsets, declared total, chunk size, and expiry are
@@ -93,10 +97,10 @@ Outbound HTTPS remains available because Access signing keys must be refreshed.
 
 ## Explicit non-goals
 
-- Durable, resumable, batch, or multi-host jobs.
+- Durable in-flight, batch, or multi-host jobs.
 - URL imports, archives, documents, SVG/PostScript/PDF, camera RAW, subtitles,
   DRM, stream copy, arbitrary transforms, or hardware acceleration.
-- Retaining EXIF/GPS metadata or source filenames beyond the disposable job.
+- Retaining EXIF/GPS metadata or source filenames beyond the expiring history record.
 - Guaranteeing that a conversion is smaller or visually lossless.
 - Claiming support for every demuxer or decoder in the installed FFmpeg build.
 

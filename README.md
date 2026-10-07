@@ -36,7 +36,7 @@ and re-probed before they can be downloaded. Every result expires automatically.
 - **Content-based input handling** — MIME type, extension, and original filename never select a parser. Inputs are demuxed through an explicit format allowlist with protocol whitelisting locked to `file`.
 - **Hard resource ceilings** — upload/output byte caps, wall-clock timeouts per media class, dimension/duration/FPS/pixel/stream limits, one conversion at a time, disk-space admission control.
 - **Origin-verified authentication** — Cloudflare Access JWTs are validated at the origin (signature, issuer, audience, expiry), so trust comes from cryptography, not forwarded headers.
-- **Disposable by design** — no database, no durable queue, no user data. A restart cancels jobs and wipes the workspace.
+- **Private result history** — completed conversions and compressions stay available for seven days by default, including across restarts. Adjust retention in the app or delete individual results sooner.
 - **Purpose-built compression** — one request automatically chooses MP4, WebP, or M4A and makes a bounded attempt to finish below 20 MB, reporting honestly when it cannot.
 
 ## Architecture
@@ -48,7 +48,7 @@ flowchart LR
     tunnel -- "loopback origin" --> api["FastAPI<br/>streaming upload + queue"]
     api -- "one at a time" --> ffmpeg["FFmpeg worker<br/>fixed argv"]
     ffmpeg -- "re-probe + validate" --> ready["Exact size<br/>ready for download"]
-    api --- work[("Disposable host<br/>work directory")]
+    api --- work[("Private host work directory<br/>expiring results + history")]
 ```
 
 The public path ends at a loopback listener; nothing else is published to the host.
@@ -83,6 +83,8 @@ GET  /v1/jobs/{id}     →  queued → inspect → convert → verify  # real pr
 GET  /v1/jobs/{id}/content                                    # only after you choose to
 DELETE /v1/jobs/{id}                                          # or let it expire
 GET  /v1/capabilities                                         # option set + limits
+GET  /v1/history                                              # your retained results
+GET/PUT /v1/history/settings                                  # future result retention
 POST /v1/compressions → GET /v1/compressions/{id}             # automatic <20 MB attempt
 ```
 
@@ -99,7 +101,7 @@ POST /v1/compressions → GET /v1/compressions/{id}             # automatic <20 
   "resolution": "720p",
   "audio": "keep",
   "created_at": "2026-08-25T14:30:00Z",
-  "expires_at": "2026-08-25T14:47:12Z",
+  "expires_at": "2026-09-01T14:32:12Z",
   "status_url": "https://media.example.com/v1/jobs/82f353b4-33ec-41dd-8466-a1a0271e398f",
   "input": {
     "bytes": 18401932,
@@ -168,14 +170,25 @@ smallest valid candidate. See [`docs/api.md`](docs/api.md).
 | --- | ---: |
 | Upload / output size | 5 GiB / 5 GiB |
 | Authenticated chunk size | 50 MiB |
-| Live jobs (incl. retained results) | 1 |
+| Active jobs (uploading, queued, processing) | 1 |
 | Concurrent conversions | 1 |
 | Upload wall time | 5 minutes |
 | Audio/video duration | 10 minutes |
 | GIF duration / input pixels | 15 s / 4 MP |
 | Visual dimensions | 50 MP total · 16,384 px per axis |
-| Result retention | 15 minutes |
+| Result retention | 7 days; adjustable per user from 1 to 90 days |
 | Incomplete upload retention | 2 hours since the last chunk |
+
+History lists only your completed jobs, with their output size, expiry, download,
+and deletion actions. Starting another conversion preserves previous results.
+Retention changes apply to future completions; existing results keep their expiry.
+The environment variable `MEDIA_MANAGER_RESULT_TTL_SECONDS` sets the default
+until a user saves an in-app preference. Uploaded source files are removed after
+processing; completed outputs, minimal job metadata, and retention preferences
+persist in the private work directory. Incomplete jobs are discarded on restart.
+History from browser login and service-token Shortcuts belongs to their respective
+Access identities and is not shared between them. Disk admission still requires
+space for the next conversion; retained results need capacity and monitoring.
 
 ## Authentication
 
@@ -216,11 +229,13 @@ FFmpeg still verifies the uploaded contents before producing any result.
 ```powershell
 uv run ruff check .
 uv run pytest
+node --test tests/test_web.cjs
 docker compose --env-file .env.example config --quiet
 ```
 
-What it does: lints, runs all tests (including real-FFmpeg conversion of every target), and
-validates Compose syntax without rendering production values.
+What it does: lints, runs Python tests (including real-FFmpeg conversion of every target),
+uses Node.js to test browser recovery and cancellation behavior, and validates Compose
+syntax without rendering production values.
 
 **Production image:**
 

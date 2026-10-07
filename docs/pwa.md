@@ -1,6 +1,6 @@
 # iPhone PWA
 
-Last updated: 2026-09-04
+Last updated: 2026-10-07
 
 The web client is a zero-build, same-origin PWA designed for iPhone Safari and
 standalone use. Install it from Safari with Share, then Add to Home Screen.
@@ -25,9 +25,25 @@ iOS safe-area insets.
 After upload completion, only the active job ID is stored in `sessionStorage`.
 If iOS evicts or reloads the PWA, the client can recover polling or a retained
 result until server expiry. Media bytes, filenames, credentials, and previews
-are not persisted. An upload interrupted by process eviction cannot be resumed
+are not persisted in browser storage. Completed outputs and minimal job metadata
+are retained privately on the server, seven days by default, across restarts.
+History opens from the converter title row and offers downloads, expiry dates,
+confirmed deletion, and a per-user retention control (1–90 days). Changes apply
+to new results. Convert another file preserves the current result in history;
+Discard result explicitly removes it. API responses and results are never cached
+by the service worker. An upload interrupted by process eviction cannot be resumed
 because Safari does not grant durable access to the selected file; reconnects
 without process loss still resume from the server's accepted chunk offset.
+
+Recovery keeps the saved job ID through temporary network errors, server
+unavailability, and session renewal. A failed status lookup clears it only when
+the server confirms the job is missing or expired.
+If browser storage is unavailable, conversion and download still work, but
+recovery after a reload is unavailable. Cancelling immediately leaves the
+progress view; delayed requests from that conversion cannot restore it or
+replace a newer job. Cleanup remains best effort when the network is unavailable.
+If an upload completion reply is lost, the client checks the existing job and
+continues polling once the server confirms it was queued.
 
 The service worker caches only the authenticated application shell, never API
 responses. Shell revisions use a versioned cache. A waiting update is announced
@@ -38,9 +54,14 @@ conversion works offline.
 Native file sharing fetches the retained result only after the user taps Share
 or save. If the Web Share files API rejects that media type or size, the Open
 fallback remains available.
+Expired results keep Share and Open disabled after a reconnect. Discarding a
+result while its share download is pending prevents that stale download from
+opening the share sheet.
 
 ## Verification Limits
 
-Static tests verify the shell contract, but Windows cannot validate standalone
-iOS process eviction, native share destinations, Safari download behavior, or
-Add to Home Screen. Those behaviors remain gated by on-device testing.
+Node behavior tests (`node --test tests/test_web.cjs`) exercise recovery and
+cancellation with controlled network responses, alongside API shell checks.
+These tests cannot validate standalone iOS process eviction, native share
+destinations, Safari download behavior, or Add to Home Screen. Those behaviors
+remain gated by on-device testing.

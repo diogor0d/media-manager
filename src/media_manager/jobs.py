@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import os
 import shutil
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -17,6 +19,7 @@ from media_manager.models import (
     CompressionJobView,
     CompressionMetadata,
     ConversionOptions,
+    HistoryEntry,
     JobError,
     JobProgress,
     JobProgressStage,
@@ -72,11 +75,17 @@ class JobRecord:
     is_compression: bool = False
     compression: CompressionMetadata | None = None
     expires_at: datetime | None = None
+    completed_at: datetime | None = None
+    history_persisted: bool = False
     cancel_event: asyncio.Event = field(default_factory=asyncio.Event)
     upload_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
 
 class JobManager:
+    _HISTORY_DIR_NAME = ".history"
+    _HISTORY_FILE_NAME = "history.json"
+    _PREFERENCES_FILE_NAME = "preferences.json"
+
     def __init__(self, settings: Settings, processor: Processor) -> None:
         self._settings = settings
         self._processor = processor
@@ -86,6 +95,15 @@ class JobManager:
         self._worker_task: asyncio.Task[None] | None = None
         self._janitor_task: asyncio.Task[None] | None = None
         self._ready = False
+        self._retention_preferences: dict[str, int] = {}
+
+    @property
+    def _preferences_dir(self) -> Path:
+        return self._settings.work_dir / self._HISTORY_DIR_NAME
+
+    @property
+    def _preferences_path(self) -> Path:
+        return self._preferences_dir / self._PREFERENCES_FILE_NAME
 
     @property
     def ready(self) -> bool:
@@ -99,7 +117,10 @@ class JobManager:
 
     async def start(self) -> None:
         self._settings.work_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
-        await self._remove_orphans()
+        await self._load_preferences()
+        restored = await self._remove_orphans()
+        async with self._lock:
+            self._jobs.update({job.id: job for job in restored})
         await self._processor.verify()
         self._worker_task = asyncio.create_task(self._worker(), name="media-worker")
         self._janitor_task = asyncio.create_task(self._janitor(), name="job-janitor")
@@ -109,7 +130,8 @@ class JobManager:
         self._ready = False
         async with self._lock:
             for job in self._jobs.values():
-                job.cancel_event.set()
+                if job.state not in (JobState.READY, JobState.FAILED):
+                    job.cancel_event.set()
 
         if self._worker_task:
             await self._queue.put(None)
@@ -126,7 +148,14 @@ class JobManager:
         async with self._lock:
             jobs = list(self._jobs.values())
             self._jobs.clear()
-        await asyncio.gather(*(self._remove_directory(job.directory) for job in jobs))
+        await asyncio.gather(
+            *(
+                self._remove_record_directory(job)
+                for job in jobs
+                if job.state not in (JobState.READY, JobState.FAILED)
+                or not job.history_persisted
+            )
+        )
 
     async def reserve(
         self,
@@ -135,26 +164,18 @@ class JobManager:
         expected_input_bytes: int | None = None,
         source_filename: str | None = None,
     ) -> JobRecord:
-        evicted: JobRecord | None = None
         async with self._lock:
-            if len(self._jobs) >= self._settings.max_live_jobs:
-                evicted = min(
-                    (
-                        job
-                        for job in self._jobs.values()
-                        if job.principal_id == principal_id
-                        and job.state in (JobState.READY, JobState.FAILED)
-                    ),
-                    key=lambda job: job.created_at,
-                    default=None,
+            active_jobs = sum(
+                job.state in (JobState.UPLOADING, JobState.QUEUED, JobState.PROCESSING)
+                for job in self._jobs.values()
+            )
+            if active_jobs >= self._settings.max_live_jobs:
+                raise ApiError(
+                    429,
+                    "QUEUE_FULL",
+                    "The conversion queue is full",
+                    headers={"Retry-After": "10"},
                 )
-                if evicted is None:
-                    raise ApiError(
-                        429,
-                        "QUEUE_FULL",
-                        "The conversion queue is full",
-                        headers={"Retry-After": "10"},
-                    )
 
             output_slots = 2 if options is None else 1
             required = self._settings.max_upload_bytes + (
@@ -197,12 +218,7 @@ class JobManager:
                 expires_at=datetime.now(UTC)
                 + timedelta(seconds=self._settings.upload_session_ttl_seconds),
             )
-            if evicted is not None:
-                self._jobs.pop(evicted.id)
-                evicted.cancel_event.set()
             self._jobs[job_id] = job
-        if evicted is not None:
-            await self._remove_record_directory(evicted)
         return job
 
     async def reserve_compression(
@@ -291,10 +307,92 @@ class JobManager:
         if job:
             await self._remove_record_directory(job)
 
+    def retention_days(self, principal_id: str) -> int:
+        configured = self._retention_preferences.get(principal_id)
+        if configured is not None:
+            return configured
+        return max(
+            1,
+            min(
+                90,
+                (self._settings.result_ttl_seconds + 86_399) // 86_400,
+            ),
+        )
+
+    def retention_seconds(self, principal_id: str) -> int:
+        configured = self._retention_preferences.get(principal_id)
+        if configured is not None:
+            return configured * 86_400
+        return self._settings.result_ttl_seconds
+
+    async def get_retention_days(self, principal_id: str) -> int:
+        async with self._lock:
+            return self.retention_days(principal_id)
+
+    async def set_retention_days(self, principal_id: str, retention_days: int) -> int:
+        if not isinstance(retention_days, int) or isinstance(retention_days, bool):
+            raise ApiError(422, "INVALID_REQUEST", "Request parameters are invalid")
+        if not 1 <= retention_days <= 90:
+            raise ApiError(422, "INVALID_REQUEST", "Request parameters are invalid")
+        async with self._lock:
+            updated = dict(self._retention_preferences)
+            updated[principal_id] = retention_days
+            try:
+                await self._write_preferences(updated)
+            except OSError as exc:
+                raise ApiError(
+                    507,
+                    "INSUFFICIENT_STORAGE",
+                    "History settings are unavailable",
+                ) from exc
+            self._retention_preferences = updated
+            return retention_days
+
+    async def history(
+        self,
+        principal_id: str,
+        limit: int,
+        offset: int,
+    ) -> tuple[list[HistoryEntry], int]:
+        expired: list[JobRecord] = []
+        async with self._lock:
+            now = datetime.now(UTC)
+            for job in list(self._jobs.values()):
+                if job.state in (JobState.READY, JobState.FAILED) and self._is_expired(job, now):
+                    self._jobs.pop(job.id, None)
+                    job.cancel_event.set()
+                    expired.append(job)
+            records = sorted(
+                (
+                    job
+                    for job in self._jobs.values()
+                    if job.principal_id == principal_id
+                    and job.state in (JobState.READY, JobState.FAILED)
+                    and job.completed_at is not None
+                ),
+                key=lambda job: job.completed_at or datetime.min.replace(tzinfo=UTC),
+                reverse=True,
+            )
+            total = len(records)
+            selected = records[offset : offset + limit]
+            result = [self._history_entry(job) for job in selected]
+        await asyncio.gather(*(self._remove_record_directory(job) for job in expired))
+        return result, total
+
     async def get(self, job_id: str, principal_id: str) -> JobView | CompressionJobView:
+        expired: JobRecord | None = None
         async with self._lock:
             job = self._authorized_job(job_id, principal_id)
-            return self._snapshot(job)
+            if self._is_expired(job):
+                self._jobs.pop(job.id, None)
+                job.cancel_event.set()
+                expired = job
+            else:
+                result = self._snapshot(job)
+        if expired is not None:
+            await self._remove_record_directory(expired)
+            raise ApiError(404, "JOB_NOT_FOUND", "Job was not found")
+        return result
 
     async def download(
         self,
@@ -302,20 +400,25 @@ class JobManager:
         principal_id: str,
         compression: bool | None = None,
     ) -> tuple[Path, str, str]:
+        expired: JobRecord | None = None
         async with self._lock:
             job = self._authorized_job(job_id, principal_id)
             if compression is not None and job.is_compression is not compression:
                 raise ApiError(404, "JOB_NOT_FOUND", "Job was not found")
-            if job.state is not JobState.READY or not job.output_path or not job.output_metadata:
+            if self._is_expired(job):
+                self._jobs.pop(job.id, None)
+                job.cancel_event.set()
+                expired = job
+            elif job.state is not JobState.READY or not job.output_path or not job.output_metadata:
                 raise ApiError(409, "JOB_NOT_READY", "Converted media is not ready")
-            if not job.output_path.is_file():
+            elif not job.output_path.is_file() or job.output_path.is_symlink():
                 raise ApiError(410, "RESULT_EXPIRED", "Converted media has expired")
-
-            # Keep the result alive while Starlette opens and streams the file.
-            minimum_expiry = datetime.now(UTC) + timedelta(seconds=60)
-            if job.expires_at is None or job.expires_at < minimum_expiry:
-                job.expires_at = minimum_expiry
-            return job.output_path, job.output_metadata.filename, job.output_metadata.media_type
+            else:
+                return job.output_path, job.output_metadata.filename, job.output_metadata.media_type
+        if expired is not None:
+            await self._remove_record_directory(expired)
+            raise ApiError(410, "RESULT_EXPIRED", "Converted media has expired")
+        raise AssertionError("unreachable")
 
     async def delete(
         self,
@@ -340,6 +443,16 @@ class JobManager:
         return job
 
     def _snapshot(self, job: JobRecord) -> JobView | CompressionJobView:
+        output = job.output_metadata
+        if output is not None:
+            output = output.model_copy(
+                update={
+                    "download_url": (
+                        f"{self._settings.public_base_url}/v1/"
+                        f"{'compressions' if job.is_compression else 'jobs'}/{job.id}/content"
+                    )
+                }
+            )
         if job.is_compression:
             return CompressionJobView(
                 id=job.id,
@@ -348,7 +461,7 @@ class JobManager:
                 expires_at=job.expires_at,
                 status_url=f"{self._settings.public_base_url}/v1/compressions/{job.id}",
                 input=job.input_metadata,
-                output=job.output_metadata,
+                output=output,
                 error=job.error,
                 progress=job.progress,
                 compression=job.compression,
@@ -366,10 +479,24 @@ class JobManager:
             expires_at=job.expires_at,
             status_url=f"{self._settings.public_base_url}/v1/jobs/{job.id}",
             input=job.input_metadata,
-            output=job.output_metadata,
+            output=output,
             error=job.error,
             progress=job.progress,
         )
+
+    def _history_entry(self, job: JobRecord) -> HistoryEntry:
+        assert job.completed_at is not None
+        return HistoryEntry(
+            id=job.id,
+            kind="compression" if job.is_compression else "conversion",
+            source_filename=job.source_filename,
+            completed_at=job.completed_at,
+            job=self._snapshot(job),
+        )
+
+    @staticmethod
+    def _is_expired(job: JobRecord, now: datetime | None = None) -> bool:
+        return job.expires_at is not None and job.expires_at <= (now or datetime.now(UTC))
 
     def _upload_snapshot(self, job: JobRecord) -> UploadView:
         if (
@@ -446,7 +573,15 @@ class JobManager:
                 self._queue.task_done()
 
     async def _finish_ready(self, job: JobRecord, result: ConversionResult) -> None:
-        await self._remove_file(job.input_path)
+        try:
+            await self._remove_file(job.input_path)
+        except OSError:
+            await self._finish_failed(
+                job,
+                "CONVERSION_FAILED",
+                "The converted media could not be saved",
+            )
+            return
         async with self._lock:
             current = self._jobs.get(job.id)
             if current is not job:
@@ -470,33 +605,81 @@ class JobManager:
                     height=result.height,
                     duration_ms=result.duration_ms,
                 )
-                job.state = JobState.READY
                 if isinstance(result, CompressionResult):
                     job.compression = result.compression
                 job.progress = None
+                job.completed_at = datetime.now(UTC)
                 job.expires_at = datetime.now(UTC) + timedelta(
-                    seconds=self._settings.result_ttl_seconds
+                    seconds=self.retention_seconds(job.principal_id)
                 )
+                job.state = JobState.READY
+                try:
+                    await self._persist_terminal_file(job)
+                except Exception:
+                    logger.error("Could not persist completed job %s", job.id)
+                    await self._finish_persistence_failure_locked(job)
+                else:
+                    job.history_persisted = True
                 remove = False
         if remove:
             await self._remove_directory(job.directory)
+            return
 
     async def _finish_failed(self, job: JobRecord, code: str, message: str) -> None:
-        await self._remove_job_files(job.directory)
+        try:
+            await self._remove_job_files(job.directory)
+        except OSError:
+            logger.error("Could not clean failed job files %s", job.id)
         async with self._lock:
             current = self._jobs.get(job.id)
             if current is job:
                 job.state = JobState.FAILED
                 job.progress = None
                 job.error = JobError(code=code, message=message)
+                job.completed_at = datetime.now(UTC)
                 job.expires_at = datetime.now(UTC) + timedelta(
-                    seconds=self._settings.result_ttl_seconds
+                    seconds=self.retention_seconds(job.principal_id)
                 )
+                job.history_persisted = False
+                try:
+                    await self._persist_terminal_file(job)
+                except Exception:
+                    logger.error("Could not persist failed job %s", job.id)
+                else:
+                    job.history_persisted = True
                 remove = False
             else:
                 remove = True
         if remove:
             await self._remove_directory(job.directory)
+            return
+
+    async def _finish_persistence_failure_locked(self, job: JobRecord) -> None:
+        try:
+            await self._remove_job_files(job.directory)
+        except OSError:
+            logger.error("Could not clean unpersisted job files %s", job.id)
+        job.state = JobState.FAILED
+        job.input_metadata = None
+        job.output_metadata = None
+        job.output_path = None
+        job.compression = None
+        job.progress = None
+        job.error = JobError(
+            code="RESULT_PERSISTENCE_FAILED",
+            message="The converted media could not be saved",
+        )
+        job.completed_at = datetime.now(UTC)
+        job.expires_at = datetime.now(UTC) + timedelta(
+            seconds=self.retention_seconds(job.principal_id)
+        )
+        job.history_persisted = False
+        try:
+            await self._persist_terminal_file(job)
+        except Exception:
+            logger.error("Could not persist fallback failure for job %s", job.id)
+        else:
+            job.history_persisted = True
 
     async def _finish_cancelled(self, job: JobRecord) -> None:
         async with self._lock:
@@ -522,6 +705,91 @@ class JobManager:
                 percent = max(job.progress.percent, percent)
             job.progress = JobProgress(stage=stage, percent=percent)
 
+    async def _persist_terminal_file(self, job: JobRecord) -> None:
+        if job.state not in (JobState.READY, JobState.FAILED) or job.completed_at is None:
+            raise ValueError("terminal job is incomplete")
+        output_basename: str | None = None
+        if job.state is JobState.READY:
+            if job.output_path is None or job.output_metadata is None:
+                raise ValueError("ready job has no output")
+            try:
+                relative = job.output_path.relative_to(job.directory)
+            except ValueError as exc:
+                raise ValueError("output is outside job directory") from exc
+            if (
+                len(relative.parts) != 1
+                or relative.name in {"", ".", "..", self._HISTORY_FILE_NAME}
+            ):
+                raise ValueError("output path is not a basename")
+            await asyncio.to_thread(
+                _validate_output_file,
+                job.output_path,
+                job.output_metadata.bytes,
+            )
+            output_basename = relative.name
+        record = {
+            "version": 1,
+            "id": job.id,
+            "principal_id": job.principal_id,
+            "kind": "compression" if job.is_compression else "conversion",
+            "state": job.state.value,
+            "created_at": job.created_at.isoformat(),
+            "completed_at": job.completed_at.isoformat(),
+            "expires_at": job.expires_at.isoformat() if job.expires_at else None,
+            "source_filename": job.source_filename,
+            "options": job.options.model_dump(mode="json") if job.options else None,
+            "input": job.input_metadata.model_dump(mode="json") if job.input_metadata else None,
+            "output": job.output_metadata.model_dump(mode="json") if job.output_metadata else None,
+            "output_basename": output_basename,
+            "error": job.error.model_dump(mode="json") if job.error else None,
+            "compression": job.compression.model_dump(mode="json") if job.compression else None,
+        }
+        await asyncio.to_thread(
+            _atomic_write_json,
+            job.directory / self._HISTORY_FILE_NAME,
+            record,
+        )
+
+    async def _load_preferences(self) -> None:
+        if (
+            self._preferences_dir.is_symlink()
+            or not self._preferences_dir.is_dir()
+            or self._preferences_path.is_symlink()
+        ):
+            self._retention_preferences = {}
+            return
+        try:
+            payload = await asyncio.to_thread(_read_json, self._preferences_path)
+        except (FileNotFoundError, OSError, ValueError, TypeError):
+            self._retention_preferences = {}
+            return
+        if not isinstance(payload, dict):
+            self._retention_preferences = {}
+            return
+        if isinstance(payload.get("retention_days"), dict):
+            payload = payload["retention_days"]
+        preferences: dict[str, int] = {}
+        for principal, value in payload.items():
+            if (
+                isinstance(principal, str)
+                and principal
+                and isinstance(value, int)
+                and not isinstance(value, bool)
+                and 1 <= value <= 90
+            ):
+                preferences[principal] = value
+        self._retention_preferences = preferences
+
+    async def _write_preferences(self, preferences: dict[str, int]) -> None:
+        if self._preferences_dir.is_symlink() or self._preferences_path.is_symlink():
+            raise OSError("history preference path is unsafe")
+        await asyncio.to_thread(
+            _atomic_write_json,
+            self._preferences_path,
+            {"version": 1, "retention_days": preferences},
+            0o600,
+        )
+
     async def _janitor(self) -> None:
         while True:
             await asyncio.sleep(self._settings.cleanup_interval_seconds)
@@ -537,9 +805,135 @@ class JobManager:
                     job.cancel_event.set()
             await asyncio.gather(*(self._remove_record_directory(job) for job in expired))
 
-    async def _remove_orphans(self) -> None:
-        children = list(self._settings.work_dir.iterdir())
-        await asyncio.gather(*(self._remove_path(path) for path in children))
+    async def _remove_orphans(self) -> list[JobRecord]:
+        children = await asyncio.to_thread(lambda: list(self._settings.work_dir.iterdir()))
+        restored: list[JobRecord] = []
+        for path in children:
+            if path.name == self._HISTORY_DIR_NAME and path.is_dir() and not path.is_symlink():
+                continue
+            try:
+                directory_uuid = uuid.UUID(path.name)
+            except (ValueError, AttributeError):
+                await self._remove_path(path)
+                continue
+            if not path.is_dir() or path.is_symlink() or str(directory_uuid) != path.name:
+                await self._remove_path(path)
+                continue
+            job = await self._restore_record(path)
+            if job is None:
+                await self._remove_path(path)
+            else:
+                restored.append(job)
+        return restored
+
+    async def _restore_record(self, directory: Path) -> JobRecord | None:
+        try:
+            record_path = directory / self._HISTORY_FILE_NAME
+            if record_path.is_symlink() or not record_path.is_file():
+                return None
+            payload = await asyncio.to_thread(_read_json, record_path)
+            if not isinstance(payload, dict) or payload.get("version") != 1:
+                return None
+            job_id = payload.get("id")
+            if not isinstance(job_id, str) or str(uuid.UUID(job_id)) != directory.name:
+                return None
+            principal_id = payload.get("principal_id")
+            kind = payload.get("kind")
+            state_value = payload.get("state")
+            if not isinstance(principal_id, str) or not principal_id:
+                return None
+            if kind not in {"conversion", "compression"}:
+                return None
+            if state_value not in {JobState.READY.value, JobState.FAILED.value}:
+                return None
+            created_at = _aware_datetime(payload.get("created_at"))
+            completed_at = _aware_datetime(payload.get("completed_at"))
+            expires_at = _aware_datetime(payload.get("expires_at"))
+            if created_at is None or completed_at is None or expires_at is None:
+                return None
+            now = datetime.now(UTC)
+            if created_at > completed_at or completed_at > expires_at or expires_at <= now:
+                return None
+            source_filename = payload.get("source_filename")
+            if source_filename is not None and not isinstance(source_filename, str):
+                return None
+            options = (
+                ConversionOptions.model_validate(payload["options"])
+                if kind == "conversion" and isinstance(payload.get("options"), dict)
+                else None
+            )
+            if kind == "conversion" and options is None:
+                return None
+            if kind == "compression" and payload.get("options") is not None:
+                return None
+            input_metadata = _model_or_none(MediaMetadata, payload.get("input"))
+            output_metadata = _model_or_none(OutputMetadata, payload.get("output"))
+            error = _model_or_none(JobError, payload.get("error"))
+            compression = _model_or_none(CompressionMetadata, payload.get("compression"))
+            state = JobState(state_value)
+            if state is JobState.READY:
+                if input_metadata is None or error is not None:
+                    return None
+                if kind == "compression" and compression is None:
+                    return None
+                if kind == "conversion" and compression is not None:
+                    return None
+            elif input_metadata is not None or error is None:
+                return None
+            output_path: Path | None = None
+            output_basename = payload.get("output_basename")
+            if state is JobState.READY:
+                if (
+                    not isinstance(output_basename, str)
+                    or not output_basename
+                    or Path(output_basename).name != output_basename
+                    or output_basename in {".", ".."}
+                    or "/" in output_basename
+                    or "\\" in output_basename
+                    or output_basename == self._HISTORY_FILE_NAME
+                    or output_metadata is None
+                ):
+                    return None
+                output_path = directory / output_basename
+                await asyncio.to_thread(
+                    _validate_output_file,
+                    output_path,
+                    output_metadata.bytes,
+                )
+            elif (
+                output_basename is not None
+                or output_metadata is not None
+                or compression is not None
+            ):
+                return None
+            children = await asyncio.to_thread(lambda: list(directory.iterdir()))
+            keep = {self._HISTORY_FILE_NAME}
+            if output_path is not None:
+                keep.add(output_path.name)
+            await asyncio.gather(
+                *(self._remove_path(child) for child in children if child.name not in keep)
+            )
+            return JobRecord(
+                id=job_id,
+                principal_id=principal_id,
+                options=options,
+                directory=directory,
+                input_path=directory / "input",
+                created_at=created_at,
+                state=state,
+                input_metadata=input_metadata,
+                output_metadata=output_metadata,
+                output_path=output_path,
+                error=error,
+                source_filename=source_filename,
+                is_compression=kind == "compression",
+                compression=compression,
+                expires_at=expires_at,
+                completed_at=completed_at,
+                history_persisted=True,
+            )
+        except (OSError, ValueError, TypeError, KeyError):
+            return None
 
     @staticmethod
     async def _remove_path(path: Path) -> None:
@@ -592,3 +986,52 @@ def _output_filename(source: str | None, fallback: str, suffix: str) -> str:
         return fallback
     stem = source.rsplit(".", maxsplit=1)[0] if "." in source else source
     return f"{stem.rstrip(' .') or 'media'}-{suffix}.{extension}"
+
+
+def _read_json(path: Path) -> object:
+    with path.open("r", encoding="utf-8") as source:
+        return json.load(source)
+
+
+def _atomic_write_json(path: Path, payload: object, mode: int = 0o600) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    descriptor = os.open(temporary, flags, mode)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as destination:
+            descriptor = -1
+            json.dump(payload, destination, separators=(",", ":"), ensure_ascii=False)
+            destination.flush()
+            os.fsync(destination.fileno())
+        os.replace(temporary, path)
+        os.chmod(path, mode)
+    finally:
+        if descriptor != -1:
+            os.close(descriptor)
+        with suppress(OSError):
+            temporary.unlink(missing_ok=True)
+
+
+def _aware_datetime(value: object) -> datetime | None:
+    if not isinstance(value, str):
+        return None
+    parsed = datetime.fromisoformat(value)
+    if parsed.tzinfo is None:
+        return None
+    return parsed.astimezone(UTC)
+
+
+def _model_or_none(model: type, value: object):
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise ValueError("invalid history model")
+    return model.model_validate(value)
+
+
+def _validate_output_file(path: Path, expected_bytes: int) -> None:
+    if path.is_symlink() or not path.is_file():
+        raise ValueError("output is not a regular file")
+    if path.stat().st_size != expected_bytes:
+        raise ValueError("output size is inconsistent")

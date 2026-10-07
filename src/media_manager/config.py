@@ -40,7 +40,7 @@ class Settings:
     max_output_bytes: int = 5 * 1024 * 1024 * 1024
     max_chunk_bytes: int = 50 * 1024 * 1024
     max_live_jobs: int = 1
-    result_ttl_seconds: int = 15 * 60
+    result_ttl_seconds: int = 7 * 24 * 60 * 60
     upload_session_ttl_seconds: int = 2 * 60 * 60
     cleanup_interval_seconds: int = 30
     upload_timeout_seconds: int = 5 * 60
@@ -147,7 +147,9 @@ class Settings:
                 "MEDIA_MANAGER_MAX_CHUNK_BYTES", 50 * 1024 * 1024
             ),
             max_live_jobs=_positive_int("MEDIA_MANAGER_MAX_LIVE_JOBS", 1),
-            result_ttl_seconds=_positive_int("MEDIA_MANAGER_RESULT_TTL_SECONDS", 15 * 60),
+            result_ttl_seconds=_positive_int(
+                "MEDIA_MANAGER_RESULT_TTL_SECONDS", 7 * 24 * 60 * 60
+            ),
             upload_session_ttl_seconds=_positive_int(
                 "MEDIA_MANAGER_UPLOAD_SESSION_TTL_SECONDS", 2 * 60 * 60
             ),

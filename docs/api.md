@@ -1,6 +1,6 @@
 # API Contract
 
-Last updated: 2026-09-04
+Last updated: 2026-10-07
 
 All `/v1/` responses are private and non-cacheable. Production clients must be
 authenticated by Cloudflare Access; jobs are visible only to the principal that
@@ -50,6 +50,26 @@ GET    /v1/compressions/{id}
 GET    /v1/compressions/{id}/content
 DELETE /v1/compressions/{id}
 ```
+
+## History
+
+`GET /v1/history?limit=50&offset=0` lists the authenticated principal's completed
+conversions and compressions, newest completion first. `limit` accepts 1–100;
+`offset` must be nonnegative. The response contains `items` and `total`. Each item
+has `id`, `kind` (`conversion` or `compression`), `source_filename`, `completed_at`,
+and `job` with the corresponding existing status response. Failed jobs are also
+listed; expired jobs are excluded. Existing content and delete routes apply.
+
+`GET /v1/history/settings` returns `{"retention_days": 7}` by default.
+`PUT /v1/history/settings` accepts the same JSON shape with an integer from 1 to
+90. Settings are private to the principal and survive restart. Changes apply to
+future completions; they do not change existing expiry dates. An explicit server
+`MEDIA_MANAGER_RESULT_TTL_SECONDS` override remains the exact default TTL until
+the principal saves a preference.
+
+Completed results and safe job metadata survive restart until expiry or explicit
+deletion. Sources are removed after processing. Incomplete jobs do not survive
+restart. Retained jobs do not count against the active queue limit.
 
 ## Common Behavior
 

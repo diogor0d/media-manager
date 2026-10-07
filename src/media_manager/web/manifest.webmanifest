@@ -2,13 +2,13 @@
   "id": "/",
   "name": "Media Manager Converter",
   "short_name": "Converter",
-  "description": "Private, disposable media conversion.",
+  "description": "Private media conversion with expiring result history.",
   "start_url": "/",
   "scope": "/",
   "display": "standalone",
   "orientation": "any",
-  "background_color": "#0a0f12",
-  "theme_color": "#0a0f12",
+  "background_color": "#eef2fb",
+  "theme_color": "#eef2fb",
   "icons": [
     {
       "src": "/assets/icon-192.png",

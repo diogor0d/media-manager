@@ -16,7 +16,7 @@ approved browser or iOS device
   -> Cloudflare Tunnel
   -> http://127.0.0.1:<host-port>   (loopback-only origin)
   -> media-manager container TCP 8080
-  -> disposable host work directory
+  -> private host work directory with expiring result history
 ```
 
 | Item | Intended value |
@@ -28,8 +28,8 @@ approved browser or iOS device
 | Public ingress | Dedicated HTTPS hostname through an existing host-managed Tunnel connector |
 | Edge policy | Cloudflare Access interactive identity for browsers and `Service Auth` for iOS automation |
 | Origin auth | Access JWT signature, issuer, audience, expiry, and principal validation |
-| Persistence | Disposable host work directory only; no user data or job state survives restart |
-| Backup | Work directory excluded by design; Git and recorded image digest are desired state |
+| Persistence | Private host work directory; completed results and retention settings survive restart, incomplete jobs do not |
+| Backup | Work directory excluded by design; result history is temporary and is lost if the bind is lost |
 | Resources | Initial ceiling: 2 CPUs, 2 GiB RAM/no extra swap, 128 PIDs |
 | Logs | Docker local driver, 10 MiB x 3; no access log or media/credential content |
 | Health | Local unauthenticated `/health/ready`; external synthetic check remains Access-authenticated |
@@ -139,7 +139,10 @@ These steps are a runbook, not standing authorization:
    track infrastructure state.
 
 Expected application downtime is only the container replacement interval.
-In-flight and retained jobs are disposable and will be lost on every restart.
+In-flight jobs are cancelled on restart. Unexpired completed results and history
+settings survive container replacement when the same work-directory bind is kept.
+Before deploying history, verify disk headroom for retained outputs and preserve
+the work directory; reverting to older releases that wipe it will lose history.
 
 ## Validation matrix
 
@@ -159,7 +162,8 @@ In-flight and retained jobs are disposable and will be lost on every restart.
 | Resources | Representative image/video/GIF conversions remain inside measured CPU, memory, PID, disk, and time budgets |
 | Compression | Video, image, and audio select the documented canonical outputs; sub-20 MB and over-target results report measured status correctly; cancellation removes every attempt directory |
 | Logs | No token, assertion, header, media content, source filename, metadata, or raw FFmpeg error is present |
-| Cleanup | Explicit delete, expiry, restart, failed conversion, and client abandonment leave no stale files |
+| History | Completed results survive restart; history/settings are isolated by principal; retained jobs do not block new work |
+| Cleanup | Explicit delete and expiry remove results; restart removes incomplete jobs while retaining unexpired history; failed jobs retain only safe metadata |
 | iOS | Signed-file/iCloud import, Wi-Fi/cellular upload, polling, exact size preview, cancel-before-download, save/share, expiry, and bad-token cases pass |
 | Monitoring | Local health, authenticated external check, restart, resource, and disk alerts reach the owner |
 

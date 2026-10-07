@@ -682,11 +682,11 @@ async def test_web_interface_and_assets_are_served_with_browser_security_headers
         schema = await client.get("/openapi.json")
         capabilities = await client.get("/v1/capabilities")
 
-    assert "Drop one media file" in responses["/"].text
+    assert "Drop a file here" in responses["/"].text
     assert 'rel="manifest" href="/manifest.webmanifest"' in responses["/"].text
     assert 'rel="apple-touch-icon"' in responses["/"].text
     assert 'apple-mobile-web-app-capable" content="yes"' in responses["/"].text
-    assert "--aperture" in responses["/assets/app.css"].text
+    assert "backdrop-filter" in responses["/assets/app.css"].text
     assert "color-scheme: dark" in responses["/assets/app.css"].text
     assert '"use strict"' in responses["/assets/app.js"].text
     assert 'navigator.serviceWorker.register("/sw.js"' in responses["/assets/app.js"].text
@@ -715,13 +715,13 @@ async def test_web_interface_and_assets_are_served_with_browser_security_headers
         "id": "/",
         "name": "Media Manager Converter",
         "short_name": "Converter",
-        "description": "Private, disposable media conversion.",
+        "description": "Private media conversion with expiring result history.",
         "start_url": "/",
         "scope": "/",
         "display": "standalone",
         "orientation": "any",
-        "background_color": "#0a0f12",
-        "theme_color": "#0a0f12",
+        "background_color": "#eef2fb",
+        "theme_color": "#eef2fb",
         "icons": [
             {
                 "src": "/assets/icon-192.png",
@@ -742,9 +742,10 @@ async def test_web_interface_and_assets_are_served_with_browser_security_headers
     assert worker.headers["service-worker-allowed"] == "/"
     assert 'url.pathname.startsWith("/v1/")' in worker.text
     assert 'request.mode === "navigate" && url.pathname === "/"' in worker.text
-    assert '["/assets/app.js?v=pwa3", "text/javascript"]' in worker.text
+    assert '["/assets/app.js?v=history1", "text/javascript"]' in worker.text
+    assert 'src="/assets/app.js?v=history1"' in responses["/"].text
     assert 'navigator.canShare?.({ files: [file] })' in responses["/assets/app.js"].text
-    assert 'sessionStorage.setItem(RECOVERY_KEY, job.id)' in responses["/assets/app.js"].text
+    assert 'rememberJob(job.id)' in responses["/assets/app.js"].text
     assert 'item.setAttribute("aria-current", "step")' in responses["/assets/app.js"].text
     assert 'env(safe-area-inset-bottom)' in responses["/assets/app.css"].text
     assert 'event.data === "SKIP_WAITING"' in worker.text
@@ -1072,7 +1073,7 @@ async def test_queue_capacity_rejects_an_additional_live_job(tmp_path: Path) -> 
         assert list(settings.work_dir.iterdir()) == []
 
 
-async def test_new_job_replaces_same_principal_terminal_job_at_capacity(
+async def test_retained_results_do_not_occupy_active_job_capacity(
     tmp_path: Path,
 ) -> None:
     settings = make_settings(tmp_path, max_live_jobs=1)
@@ -1103,7 +1104,9 @@ async def test_new_job_replaces_same_principal_terminal_job_at_capacity(
             content=b"other-principal-source",
             headers=other_headers,
         )
-        assert_error(other, 429, "QUEUE_FULL", "The conversion queue is full")
+        assert other.status_code == 202
+        other_job_id = other.json()["id"]
+        await wait_for_state(client, other_job_id, "ready", headers=other_headers)
 
         second = await client.post(
             "/v1/jobs",
@@ -1113,17 +1116,20 @@ async def test_new_job_replaces_same_principal_terminal_job_at_capacity(
         )
 
         assert second.status_code == 202
-        assert_error(
-            await client.get(f"/v1/jobs/{first_job_id}", headers=owner_headers),
-            404,
-            "JOB_NOT_FOUND",
-            "Job was not found",
-        )
-        assert not (settings.work_dir / first_job_id).exists()
+        retained = await client.get(f"/v1/jobs/{first_job_id}", headers=owner_headers)
+        assert retained.status_code == 200
+        assert retained.json()["state"] == "ready"
+        assert (settings.work_dir / first_job_id / "result.mp4").read_bytes() == OUTPUT_CONTENT
         second_job_id = second.json()["id"]
         await wait_for_state(client, second_job_id, "ready", headers=owner_headers)
         deleted = await client.delete(f"/v1/jobs/{second_job_id}", headers=owner_headers)
         assert deleted.status_code == 204
+        assert (
+            await client.delete(f"/v1/jobs/{first_job_id}", headers=owner_headers)
+        ).status_code == 204
+        assert (
+            await client.delete(f"/v1/jobs/{other_job_id}", headers=other_headers)
+        ).status_code == 204
 
 
 async def test_unhandled_processing_failure_returns_only_a_safe_error(tmp_path: Path) -> None:
@@ -1151,7 +1157,11 @@ async def test_unhandled_processing_failure_returns_only_a_safe_error(tmp_path: 
             "message": "The media could not be converted",
         }
         assert secret not in str(failed)
-        assert list((settings.work_dir / job_id).iterdir()) == []
+        # Failed history persists only safe metadata, never source or partial media.
+        remaining = list((settings.work_dir / job_id).iterdir())
+        assert len(remaining) == 1
+        assert remaining[0].suffix == ".json"
+        assert secret not in remaining[0].read_text()
 
         assert_error(
             await client.get(f"/v1/jobs/{job_id}/content"),
