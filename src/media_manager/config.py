@@ -49,7 +49,8 @@ class Settings:
     max_image_pixels: int = 50_000_000
     max_animation_pixels: int = 4_000_000
     max_axis_pixels: int = 16_384
-    max_streams: int = 8
+    # Phone recordings can include many metadata tracks alongside video/audio.
+    max_streams: int = 64
     ffmpeg_threads: int = 2
 
     def __post_init__(self) -> None:
@@ -166,6 +167,6 @@ class Settings:
                 "MEDIA_MANAGER_MAX_ANIMATION_PIXELS", 4_000_000
             ),
             max_axis_pixels=_positive_int("MEDIA_MANAGER_MAX_AXIS_PIXELS", 16_384),
-            max_streams=_positive_int("MEDIA_MANAGER_MAX_STREAMS", 8),
+            max_streams=_positive_int("MEDIA_MANAGER_MAX_STREAMS", 64),
             ffmpeg_threads=_positive_int("MEDIA_MANAGER_FFMPEG_THREADS", 2),
         )

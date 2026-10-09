@@ -678,8 +678,13 @@ class MediaProcessor:
         raw_format = payload.get("format")
         if not isinstance(raw_streams, list) or not isinstance(raw_format, dict):
             raise ValueError("missing probe fields")
-        if not raw_streams or len(raw_streams) > self._settings.max_streams:
-            raise ProcessingError("MEDIA_LIMIT_EXCEEDED", "Media has an invalid stream count")
+        if not raw_streams:
+            raise ProcessingError("UNSUPPORTED_MEDIA", "Media has no audio or visual streams")
+        if len(raw_streams) > self._settings.max_streams:
+            raise ProcessingError(
+                "MEDIA_LIMIT_EXCEEDED",
+                f"Media has {len(raw_streams)} streams; the limit is {self._settings.max_streams}",
+            )
 
         streams: list[StreamInfo] = []
         for item in raw_streams:

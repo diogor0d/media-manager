@@ -176,6 +176,7 @@ smallest valid candidate. See [`docs/api.md`](docs/api.md).
 | Audio/video duration | 10 minutes |
 | GIF duration / input pixels | 15 s / 4 MP |
 | Visual dimensions | 50 MP total · 16,384 px per axis |
+| Input tracks (including metadata) | 64; only the selected video/audio tracks are converted |
 | Result retention | 7 days; adjustable per user from 1 to 90 days |
 | Incomplete upload retention | 2 hours since the last chunk |
 
