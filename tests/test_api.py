@@ -355,6 +355,7 @@ async def test_capabilities_report_the_supported_contract_and_limits(tmp_path: P
         "max_chunk_bytes": 789,
         "result_ttl_seconds": 456,
         "compression_target_bytes": 20_000_000,
+        "downloads_enabled": False,
     }
 
 
@@ -550,6 +551,7 @@ async def test_download_filename_uses_sanitized_source_basename(tmp_path: Path) 
     assert ready["output"]["filename"] == "Camera Clip-converted.mp4"
     assert "Camera%20Clip-converted.mp4" in download.headers["content-disposition"]
 
+
 async def test_chunk_size_limit_is_enforced_before_writing(tmp_path: Path) -> None:
     settings = make_settings(tmp_path, max_chunk_bytes=4)
     processor = FakeProcessor()
@@ -692,7 +694,7 @@ async def test_web_interface_and_assets_are_served_with_browser_security_headers
     assert 'navigator.serviceWorker.register("/sw.js"' in responses["/assets/app.js"].text
     assert "apiJson(createdResponse)" in responses["/assets/app.js"].text
     assert (
-        'if (!state.capabilities) return window.location.reload()'
+        "if (!state.capabilities) return window.location.reload()"
         in responses["/assets/app.js"].text
     )
     assert '$("#file-input").disabled = !available' in responses["/assets/app.js"].text
@@ -701,11 +703,11 @@ async def test_web_interface_and_assets_are_served_with_browser_security_headers
     assert 'download.setAttribute("aria-disabled"' in responses["/assets/app.js"].text
     assert 'type="range" min="0" max="100" step="1" value="50"' in responses["/"].text
     assert 'data-stage="converting"' in responses["/"].text
-    assert 'quality_percent: qualityPercent' in responses["/assets/app.js"].text
-    assert '"Upload-Filename": encodeURIComponent(state.file.name)' in responses[
-        "/assets/app.js"
-    ].text
-    assert 'job.progress?.percent' in responses["/assets/app.js"].text
+    assert "quality_percent: qualityPercent" in responses["/assets/app.js"].text
+    assert (
+        '"Upload-Filename": encodeURIComponent(state.file.name)' in responses["/assets/app.js"].text
+    )
+    assert "job.progress?.percent" in responses["/assets/app.js"].text
     assert "Media Manager" in responses["/assets/logo.svg"].text
     assert responses["/favicon.svg"].headers["content-type"] == "image/svg+xml"
     manifest = responses["/manifest.webmanifest"]
@@ -742,12 +744,12 @@ async def test_web_interface_and_assets_are_served_with_browser_security_headers
     assert worker.headers["service-worker-allowed"] == "/"
     assert 'url.pathname.startsWith("/v1/")' in worker.text
     assert 'request.mode === "navigate" && url.pathname === "/"' in worker.text
-    assert '["/assets/app.js?v=history1", "text/javascript"]' in worker.text
-    assert 'src="/assets/app.js?v=history1"' in responses["/"].text
-    assert 'navigator.canShare?.({ files: [file] })' in responses["/assets/app.js"].text
-    assert 'rememberJob(job.id)' in responses["/assets/app.js"].text
+    assert '["/assets/app.js?v=workflows2", "text/javascript"]' in worker.text
+    assert 'src="/assets/app.js?v=workflows2"' in responses["/"].text
+    assert "navigator.canShare?.({ files: [file] })" in responses["/assets/app.js"].text
+    assert "rememberJob(job.id)" in responses["/assets/app.js"].text
     assert 'item.setAttribute("aria-current", "step")' in responses["/assets/app.js"].text
-    assert 'env(safe-area-inset-bottom)' in responses["/assets/app.css"].text
+    assert "env(safe-area-inset-bottom)" in responses["/assets/app.css"].text
     assert 'event.data === "SKIP_WAITING"' in worker.text
     assert "event.waitUntil(cacheShell())" in worker.text
     assert ").then(() => self.clients.claim())" in worker.text
@@ -843,7 +845,9 @@ async def test_raw_upload_transitions_to_ready_then_downloads_and_deletes_exact_
             "input": None,
             "output": None,
             "error": None,
-            "progress": {"stage": "queued", "percent": None},
+            "progress": {"stage": "queued", "percent": None, "eta_seconds": None},
+            "origin": "api",
+            "parent_id": None,
         }
         assert datetime.fromisoformat(created["created_at"]).tzinfo is not None
 
@@ -851,6 +855,7 @@ async def test_raw_upload_transitions_to_ready_then_downloads_and_deletes_exact_
         processing_response = await client.get(expected_status_url)
         assert processing_response.status_code == 200
         processing = processing_response.json()
+        assert processing["progress"].pop("eta_seconds") >= 0
         assert processing == {
             **created,
             "state": "processing",
@@ -872,6 +877,8 @@ async def test_raw_upload_transitions_to_ready_then_downloads_and_deletes_exact_
         await asyncio.wait_for(processor.convert_finished.wait(), timeout=5)
         ready = await wait_for_state(client, job_id, "ready")
         assert ready == {
+            "origin": "api",
+            "parent_id": None,
             "id": job_id,
             "state": "ready",
             "target": "video-mp4",
@@ -1224,7 +1231,5 @@ async def test_jobs_are_hidden_from_other_principals_with_not_found_responses(
         )
         assert owner_download.status_code == 200
         assert owner_download.content == OUTPUT_CONTENT
-        assert (
-            await client.delete(f"/v1/jobs/{job_id}", headers=owner_headers)
-        ).status_code == 204
+        assert (await client.delete(f"/v1/jobs/{job_id}", headers=owner_headers)).status_code == 204
         assert list(settings.work_dir.iterdir()) == []

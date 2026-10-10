@@ -15,8 +15,8 @@
   <link rel="icon" href="/favicon.svg" type="image/svg+xml">
   <link rel="apple-touch-icon" href="/assets/apple-touch-icon.png">
   <link rel="manifest" href="/manifest.webmanifest">
-  <link rel="stylesheet" href="/assets/app.css?v=history1">
-  <script src="/assets/app.js?v=history1" defer></script>
+  <link rel="stylesheet" href="/assets/app.css?v=workflows2">
+  <script src="/assets/app.js?v=workflows2" defer></script>
 </head>
 <body>
   <header class="masthead">
@@ -30,11 +30,46 @@
 
   <main>
     <section class="intro" aria-labelledby="page-title">
-      <h1 id="page-title">Convert media</h1>
+      <h1 id="page-title">Media tools</h1>
       <button id="history-button" class="secondary-action" type="button" aria-expanded="false" aria-controls="history-panel">History</button>
     </section>
 
     <section class="bench" aria-label="Media conversion">
+      <nav id="mode-switch" class="mode-switch" aria-label="Choose a media task">
+        <button type="button" data-mode="download" aria-pressed="false">Download</button>
+        <button type="button" data-mode="convert" aria-pressed="true">Convert</button>
+        <button type="button" data-mode="compress" aria-pressed="false">Compress</button>
+      </nav>
+      <form id="download-form" class="download-form" hidden>
+        <div class="section-label"><span>Download from a link</span><small>Review the file before you save it</small></div>
+        <label class="url-field" for="media-url">Media URL<input id="media-url" name="url" type="url" required inputmode="url" autocomplete="url" placeholder="https://…"></label>
+        <div class="download-options">
+          <label class="select-field"><span>Type</span><select id="download-type" name="download_type"><option value="video">Video</option><option value="audio">Audio</option><option value="thumbnail">Thumbnail</option></select></label>
+          <label class="select-field"><span>Quality</span><input id="download-quality" name="quality" list="download-quality-presets" value="best"><datalist id="download-quality-presets"><option value="best"><option value="1080"><option value="720"><option value="480"><option value="360"><option value="worst"></datalist></label>
+          <label class="select-field"><span>Format</span><input id="download-format" name="format" list="download-format-presets" value="ios"><datalist id="download-format-presets"><option value="ios"><option value="mp4"><option value="webm"><option value="mkv"><option value="audio"><option value="auto"><option value="m4a"><option value="mp3"><option value="opus"><option value="wav"><option value="flac"></datalist></label>
+          <label class="select-field" id="download-codec-field"><span>Codec</span><input id="download-codec" name="codec" list="download-codec-presets" value="h264"><datalist id="download-codec-presets"><option value="h264"><option value="h265"><option value="vp9"><option value="av1"><option value="aac"><option value="opus"><option value="auto"></datalist></label>
+        </div>
+        <label class="check-field download-auto"><input id="download-auto-process" type="checkbox"><span>Process after the download is ready</span></label>
+        <label class="select-field"><span>After download</span><select id="download-workflow"><option value="download">Download only</option><option value="convert">Convert</option><option value="compress">Compress</option><option value="convert_compress">Convert, then compress</option></select></label>
+        <details class="download-process-options">
+          <summary>Processing options</summary>
+          <div class="download-options">
+            <label class="select-field"><span>Output format</span><select id="download-target"></select></label>
+            <label class="select-field"><span>Resolution</span><select id="download-resolution"></select></label>
+            <label class="select-field"><span>Sound</span><select id="download-audio"></select></label>
+          </div>
+          <label class="select-field download-quality-field"><span>Quality <output id="download-quality-value">50%</output></span><input id="download-quality-percent" type="range" min="0" max="100" value="50"></label>
+          <div class="option-grid">
+            <label class="select-field"><span>Compression limit (bytes)</span><input id="download-target-bytes" type="number" min="1" step="1" value="20000000"></label>
+          </div>
+        </details>
+        <p id="download-hint" class="quality-note">Video and audio options follow the source site’s available formats.</p>
+        <button class="primary-action" type="submit" id="download-submit">Prepare download</button>
+        <div id="download-review" class="download-review" hidden>
+          <p id="download-review-detail"></p>
+          <div class="result-actions"><a id="download-source-button" class="secondary-action" href="#" download>Download file</a><button id="download-process-button" class="primary-action" type="button">Process this file</button><button id="download-discard-button" class="secondary-action" type="button">Discard</button></div>
+        </div>
+      </form>
       <div id="drop-zone" class="drop-zone" tabindex="0" role="button" aria-label="Choose a media file or drop one here" aria-controls="file-input" data-view-focus>
         <input id="file-input" type="file" accept="image/*,video/*,audio/*" hidden>
         <div class="media-sculpture" aria-hidden="true">
@@ -81,7 +116,7 @@
             <div id="target-options" class="target-options"></div>
           </fieldset>
 
-          <div class="option-grid">
+          <div id="conversion-quality-options" class="option-grid">
             <fieldset class="quality-field">
               <legend>Quality <output id="quality-value" for="quality-slider">50%</output></legend>
               <label class="sr-only" for="quality-slider">Output quality</label>
@@ -95,6 +130,26 @@
               <select id="resolution-select"></select>
             </label>
           </div>
+
+          <div id="workflow-options" class="workflow-options">
+            <label class="select-field"><span>Workflow</span><select id="workflow-select"><option value="convert">Convert</option><option value="compress">Compress</option><option value="convert_compress">Convert, then compress</option></select></label>
+          </div>
+          <details id="compression-options" class="compression-options">
+            <summary>Compression target and quality</summary>
+            <div class="option-grid">
+              <label class="select-field"><span>Maximum file size</span><input id="compression-target-bytes" type="number" min="1" step="1" value="20000000"></label>
+              <label class="select-field"><span>Resolution cap</span><select id="compression-resolution"></select></label>
+            </div>
+            <div class="option-grid">
+              <label class="select-field"><span>Sound</span><select id="compression-audio"></select></label>
+              <label class="quality-field" for="compression-quality"><span>Quality <output id="compression-quality-value" for="compression-quality">50%</output></span><input id="compression-quality" type="range" min="0" max="100" step="1" value="50"></label>
+            </div>
+          </details>
+          <section id="estimate-review" class="estimate-review" aria-live="polite" hidden>
+            <p class="section-label">Estimate for review</p>
+            <p id="estimate-summary"></p>
+            <div class="result-actions"><button id="refine-estimate" class="secondary-action" type="button">Refine estimate</button><button id="discard-prepared-button" class="secondary-action" type="button">Discard</button><button id="start-job-button" class="primary-action" type="button">Start processing</button></div>
+          </section>
 
           <fieldset id="audio-field" hidden>
             <legend>Sound</legend>
@@ -128,7 +183,7 @@
 
       <div id="result-view" class="result-view" hidden data-view-focus tabindex="-1">
         <p class="ready-label"><span aria-hidden="true"></span>Ready</p>
-        <h2>Conversion complete</h2>
+        <h2 id="result-title">Conversion complete</h2>
         <div class="receipt">
           <div><span>Input</span><strong id="result-input-size"></strong><small id="result-input-meta"></small></div>
           <div class="receipt-arrow" aria-hidden="true">→</div>

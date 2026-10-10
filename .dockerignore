@@ -3,6 +3,8 @@
 .env
 .env.*
 !.env.example
+deploy/*.env*
+deploy/telegram/*.env*
 .venv
 .pytest_cache
 .ruff_cache

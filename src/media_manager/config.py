@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+import json
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
 from urllib.parse import urlparse
@@ -52,8 +53,51 @@ class Settings:
     # Phone recordings can include many metadata tracks alongside video/audio.
     max_streams: int = 64
     ffmpeg_threads: int = 2
+    principal_owners: dict[str, str] = field(default_factory=dict)
+    metube_sidecar_url: str | None = None
+    metube_sidecar_api_key: str | None = field(default=None, repr=False)
+    telegram_bot_token: str | None = field(default=None, repr=False)
+    telegram_api_base_url: str = "https://api.telegram.org"
+    telegram_chat_id: int | None = None
+    telegram_user_id: int | None = None
+    telegram_owner_id: str | None = None
+    telegram_file_root: Path | None = None
+
+    def owner_id(self, principal_id: str) -> str:
+        return self.principal_owners.get(principal_id, principal_id)
 
     def __post_init__(self) -> None:
+        if not isinstance(self.principal_owners, dict):
+            raise ValueError("PRINCIPAL_OWNERS must be a JSON object")
+        for source, owner in self.principal_owners.items():
+            if (
+                not isinstance(source, str) or not isinstance(owner, str)
+                or not source.startswith(("user:", "service:", "telegram:"))
+                or not owner.startswith("user:") or len(owner) <= 5
+                or source in self.principal_owners.values()
+            ):
+                raise ValueError("PRINCIPAL_OWNERS must map identities directly to user owners")
+        for name, value in (
+            ("METUBE_SIDECAR_URL", self.metube_sidecar_url),
+            ("TELEGRAM_API_BASE_URL", self.telegram_api_base_url),
+        ):
+            if value is None:
+                continue
+            parsed = urlparse(value)
+            if (
+                parsed.scheme not in {"http", "https"} or not parsed.hostname
+                or parsed.username is not None or parsed.password is not None
+                or parsed.path not in {"", "/"} or parsed.query or parsed.fragment
+                or value.endswith("/")
+            ):
+                raise ValueError(f"{name} must be an origin URL")
+        if self.telegram_bot_token and (
+            not self.telegram_chat_id or self.telegram_chat_id <= 0
+            or not self.telegram_user_id or self.telegram_user_id <= 0
+            or not self.telegram_owner_id
+            or not self.telegram_owner_id.startswith("user:")
+        ):
+            raise ValueError("Telegram requires a private chat, authorized user and owner")
         public_url = urlparse(self.public_base_url)
         if (
             public_url.scheme not in {"http", "https"}
@@ -129,6 +173,20 @@ class Settings:
             issuer = issuer.rstrip("/")
 
         return cls(
+            principal_owners=json.loads(os.getenv("MEDIA_MANAGER_PRINCIPAL_OWNERS", "{}")),
+            metube_sidecar_url=os.getenv("MEDIA_MANAGER_METUBE_SIDECAR_URL") or None,
+            metube_sidecar_api_key=os.getenv("MEDIA_MANAGER_METUBE_SIDECAR_API_KEY") or None,
+            telegram_bot_token=os.getenv("MEDIA_MANAGER_TELEGRAM_BOT_TOKEN") or None,
+            telegram_api_base_url=os.getenv(
+                "MEDIA_MANAGER_TELEGRAM_API_BASE_URL", "https://api.telegram.org"
+            ),
+            telegram_chat_id=_optional_int("MEDIA_MANAGER_TELEGRAM_CHAT_ID"),
+            telegram_user_id=_optional_int("MEDIA_MANAGER_TELEGRAM_USER_ID"),
+            telegram_owner_id=os.getenv("MEDIA_MANAGER_TELEGRAM_OWNER_ID") or None,
+            telegram_file_root=(
+                Path(os.environ["MEDIA_MANAGER_TELEGRAM_FILE_ROOT"])
+                if os.getenv("MEDIA_MANAGER_TELEGRAM_FILE_ROOT") else None
+            ),
             work_dir=Path(os.getenv("MEDIA_MANAGER_WORK_DIR", "/work")),
             auth_mode=auth_mode,
             public_base_url=os.getenv(
@@ -170,3 +228,8 @@ class Settings:
             max_streams=_positive_int("MEDIA_MANAGER_MAX_STREAMS", 64),
             ffmpeg_threads=_positive_int("MEDIA_MANAGER_FFMPEG_THREADS", 2),
         )
+
+
+def _optional_int(name: str) -> int | None:
+    value = os.getenv(name)
+    return int(value) if value else None

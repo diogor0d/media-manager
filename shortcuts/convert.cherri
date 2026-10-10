@@ -24,5 +24,5 @@ menu "Output format" {
     item "Opus":
         @target = "audio-opus"
 }
-@createURL = "{baseURL}/v1/jobs?target={@target}"
+@createURL = "{baseURL}/v1/jobs?target={@target}&prepare_only=true"
 #include 'job.cherri'

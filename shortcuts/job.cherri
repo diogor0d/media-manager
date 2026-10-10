@@ -10,30 +10,12 @@ const created = rawAction("is.workflow.actions.downloadurl", {
         "Upload-Filename": "{uploadFilename}"
     }
 })
-// Temporary diagnostic: preview the actual POST output before dictionary parsing.
-alert("Diagnostic build: the next preview shows the upload response locally. Do not share the raw response or screenshots containing credentials. Note whether it is JSON, a login/error page, or empty, then close it to continue.")
-quicklook(created)
 const creation = getDictionary(created)
 const jobID = getValue(creation, "id")
 const creationState = getValue(creation, "state")
 const validID = matchText('^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$', "{jobID}")
-if !validID || creationState.text != "queued" {
-    // Only report schema diagnostics, never the raw HTTP response or credentials.
-    @idCheck = "missing or invalid UUID"
-    if validID {
-        @idCheck = "valid UUID"
-    }
-    @stateCheck = "missing or unrecognised"
-    const knownState = matchText('\A(?:uploading|queued|processing|ready|failed)\z', "{creationState}")
-    if knownState {
-        @stateCheck = "{knownState}"
-    }
-    const creationErrorRaw = getValue(creation, "error")
-    @errorCheck = "no API error field"
-    if creationErrorRaw {
-        @errorCheck = "API error field present"
-    }
-    alert("Upload response check failed.\nID: {@idCheck}\nState: {@stateCheck}\nError: {@errorCheck}\nNo raw response or credentials are shown. Server expiry remains responsible for any uploaded job.")
+if !validID || creationState.text != "awaiting_review" {
+    alert("The media could not be prepared for review. Check the file and try again.")
     stop()
 }
 // Never use response-supplied URLs as credential-bearing request destinations.
@@ -41,6 +23,68 @@ if !validID || creationState.text != "queued" {
 @contentURL = "{@statusURL}/content"
 const returnedStatus = getValue(creation, "status_url")
 if returnedStatus.text != @statusURL {
+    alert("Unexpected status URL. Check the server public base URL.")
+    stop()
+}
+@estimateURL = "{baseURL}/v1/jobs/{jobID}/estimate"
+@startURL = "{baseURL}/v1/jobs/{jobID}/start"
+const estimateRaw = rawAction("is.workflow.actions.downloadurl", {
+    "WFURL": "{@estimateURL}",
+    "WFHTTPMethod": "POST",
+    "WFHTTPBodyType": "JSON",
+    "WFJSONValues": {},
+    "WFHTTPHeaders": {
+        "CF-Access-Client-Id": "{clientID}",
+        "CF-Access-Client-Secret": "{clientSecret}",
+        "Accept": "application/json"
+    }
+})
+@estimate = getDictionary(estimateRaw)
+const sizeMin = getValue(@estimate, "size_min_bytes")
+const sizeMax = getValue(@estimate, "size_max_bytes")
+const etaMin = getValue(@estimate, "eta_min_seconds")
+const etaMax = getValue(@estimate, "eta_max_seconds")
+const method = getValue(@estimate, "method")
+const confidence = getValue(@estimate, "confidence")
+const estimateSourceRaw = getValue(@estimate, "source")
+const estimateSource = getDictionary(estimateSourceRaw)
+const sourceBytes = getValue(estimateSource, "bytes")
+const reductionMinValue = (sourceBytes.number - sizeMax.number) / sourceBytes.number * 100
+const reductionMaxValue = (sourceBytes.number - sizeMin.number) / sourceBytes.number * 100
+const reductionMin = formatNumber(reductionMinValue, 0)
+const reductionMax = formatNumber(reductionMaxValue, 0)
+@decision = ""
+menu "Estimate: {sizeMin}–{sizeMax} bytes · change {reductionMin}% to {reductionMax}% (positive means smaller) · {etaMin}–{etaMax} sec · {confidence} confidence · {method}. Start, refine, or discard?" {
+    item "Start":
+        @decision = "start"
+    item "Refine estimate":
+        @decision = "refine"
+    item "Discard":
+        @decision = "discard"
+}
+if @decision == "refine" {
+    const refinedRaw = downloadURL(@estimateURL, {"CF-Access-Client-Id": "{clientID}", "CF-Access-Client-Secret": "{clientSecret}"})
+    @estimate = getDictionary(refinedRaw)
+    const refinedSizeMin = getValue(@estimate, "size_min_bytes")
+    const refinedSizeMax = getValue(@estimate, "size_max_bytes")
+    const refinedEtaMin = getValue(@estimate, "eta_min_seconds")
+    const refinedEtaMax = getValue(@estimate, "eta_max_seconds")
+    const refinedConfidence = getValue(@estimate, "confidence")
+    const refinedSourceRaw = getValue(@estimate, "source")
+    const refinedSource = getDictionary(refinedSourceRaw)
+    const refinedSourceBytes = getValue(refinedSource, "bytes")
+    const refinedReductionMinValue = (refinedSourceBytes.number - refinedSizeMax.number) / refinedSourceBytes.number * 100
+    const refinedReductionMaxValue = (refinedSourceBytes.number - refinedSizeMin.number) / refinedSourceBytes.number * 100
+    const refinedReductionMin = formatNumber(refinedReductionMinValue, 0)
+    const refinedReductionMax = formatNumber(refinedReductionMaxValue, 0)
+    menu "Refined estimate: {refinedSizeMin}–{refinedSizeMax} bytes · change {refinedReductionMin}% to {refinedReductionMax}% (positive means smaller) · {refinedEtaMin}–{refinedEtaMax} sec · {refinedConfidence} confidence. Start or discard?" {
+        item "Start":
+            @decision = "start"
+        item "Discard":
+            @decision = "discard"
+    }
+}
+if @decision == "discard" {
     rawAction("is.workflow.actions.downloadurl", {
         "WFURL": "{@statusURL}",
         "WFHTTPMethod": "DELETE",
@@ -49,38 +93,39 @@ if returnedStatus.text != @statusURL {
             "CF-Access-Client-Secret": "{clientSecret}"
         }
     })
-    alert("Unexpected status URL. Check the server public base URL.")
+    stop()
+}
+const startedRaw = rawAction("is.workflow.actions.downloadurl", {
+    "WFURL": "{@startURL}",
+    "WFHTTPMethod": "POST",
+    "WFHTTPBodyType": "JSON",
+    "WFJSONValues": {},
+    "WFHTTPHeaders": {
+        "CF-Access-Client-Id": "{clientID}",
+        "CF-Access-Client-Secret": "{clientSecret}",
+        "Accept": "application/json"
+    }
+})
+@response = getDictionary(startedRaw)
+const startedID = getValue(@response, "id")
+const startedURL = getValue(@response, "status_url")
+const startedState = getValue(@response, "state")
+if startedID.text != jobID.text || startedURL.text != @statusURL || startedState.text != "queued" {
+    alert("The job could not be started safely. Check the server response.")
     stop()
 }
 @ready = false
-@response = creation
-@completedPolls = 0
-@lastState = "No status response processed"
 repeat poll for 200 {
     if @ready == false {
         if @poll > 1 {
             wait(3)
         }
         const status = downloadURL(@statusURL, {"CF-Access-Client-Id": "{clientID}", "CF-Access-Client-Secret": "{clientSecret}"})
-        @completedPolls += 1
         @response = getDictionary(status)
         const responseID = getValue(@response, "id")
         const responseURL = getValue(@response, "status_url")
         const state = getValue(@response, "state")
-        const safePollState = matchText('\A(?:uploading|queued|processing|ready|failed)\z', "{state}")
-        @lastState = "Missing or unrecognised state"
-        if safePollState {
-            @lastState = "{safePollState}"
-        }
         if responseID.text != jobID.text || responseURL.text != @statusURL {
-            rawAction("is.workflow.actions.downloadurl", {
-                "WFURL": "{@statusURL}",
-                "WFHTTPMethod": "DELETE",
-                "WFHTTPHeaders": {
-                    "CF-Access-Client-Id": "{clientID}",
-                    "CF-Access-Client-Secret": "{clientSecret}"
-                }
-            })
             alert("Malformed job identity or status URL.")
             stop()
         }
@@ -91,26 +136,10 @@ repeat poll for 200 {
                 const errorRaw = getValue(@response, "error")
                 const errorData = getDictionary(errorRaw)
                 const errorMessage = getValue(errorData, "message")
-                rawAction("is.workflow.actions.downloadurl", {
-                    "WFURL": "{@statusURL}",
-                    "WFHTTPMethod": "DELETE",
-                    "WFHTTPHeaders": {
-                        "CF-Access-Client-Id": "{clientID}",
-                        "CF-Access-Client-Secret": "{clientSecret}"
-                    }
-                })
                 alert("Job failed: {errorMessage}")
                 stop()
             } else {
-                if state.text != "queued" && state.text != "processing" && state.text != "uploading" {
-                    rawAction("is.workflow.actions.downloadurl", {
-                        "WFURL": "{@statusURL}",
-                        "WFHTTPMethod": "DELETE",
-                        "WFHTTPHeaders": {
-                            "CF-Access-Client-Id": "{clientID}",
-                            "CF-Access-Client-Secret": "{clientSecret}"
-                        }
-                    })
+                if state.text != "queued" && state.text != "processing" {
                     alert("Unknown or missing job state.")
                     stop()
                 }
@@ -119,16 +148,7 @@ repeat poll for 200 {
     }
 }
 if @ready == false {
-    const pollingFailure = text("Polling timed out without a ready result.\nCompleted status requests: {@completedPolls}\nLast state: {@lastState}\nCleanup will be attempted after closing this alert.")
-    alert("{pollingFailure}", "Media Manager: Polling Diagnostic v2")
-    rawAction("is.workflow.actions.downloadurl", {
-        "WFURL": "{@statusURL}",
-        "WFHTTPMethod": "DELETE",
-        "WFHTTPHeaders": {
-            "CF-Access-Client-Id": "{clientID}",
-            "CF-Access-Client-Secret": "{clientSecret}"
-        }
-    })
+    alert("Conversion timed out. Please try again.", "Media Manager")
     stop()
 }
 const inputRaw = getValue(@response, "input")
@@ -143,26 +163,10 @@ const returnedDownload = getValue(outputData, "download_url")
 const validInputBytes = matchText('^[1-9][0-9]*$', "{inputBytes}")
 const validOutputBytes = matchText('^[1-9][0-9]*$', "{outputBytes}")
 if !validInputBytes || !validOutputBytes || !@outputFileName || @outputFileName contains "/" || @outputFileName contains "\\" {
-    rawAction("is.workflow.actions.downloadurl", {
-        "WFURL": "{@statusURL}",
-        "WFHTTPMethod": "DELETE",
-        "WFHTTPHeaders": {
-            "CF-Access-Client-Id": "{clientID}",
-            "CF-Access-Client-Secret": "{clientSecret}"
-        }
-    })
     alert("Missing or invalid result sizes or filename.")
     stop()
 }
 if returnedDownload.text != @contentURL {
-    rawAction("is.workflow.actions.downloadurl", {
-        "WFURL": "{@statusURL}",
-        "WFHTTPMethod": "DELETE",
-        "WFHTTPHeaders": {
-            "CF-Access-Client-Id": "{clientID}",
-            "CF-Access-Client-Secret": "{clientSecret}"
-        }
-    })
     alert("Unexpected download URL.")
     stop()
 }
@@ -175,45 +179,21 @@ if @compress == true {
     const attempts = getValue(compressionData, "attempts")
     const validAttempts = matchText('^[1-5]$', "{attempts}")
     if targetBytes.text != "20000000" || !validAttempts {
-        rawAction("is.workflow.actions.downloadurl", {
-            "WFURL": "{@statusURL}",
-            "WFHTTPMethod": "DELETE",
-            "WFHTTPHeaders": {
-                "CF-Access-Client-Id": "{clientID}",
-                "CF-Access-Client-Secret": "{clientSecret}"
-            }
-        })
         alert("Invalid compression threshold or attempt count.")
         stop()
     }
     if outputBytes.number < 20000000 {
         if metTarget.number != 1 {
-            rawAction("is.workflow.actions.downloadurl", {
-                "WFURL": "{@statusURL}",
-                "WFHTTPMethod": "DELETE",
-                "WFHTTPHeaders": {
-                    "CF-Access-Client-Id": "{clientID}",
-                    "CF-Access-Client-Secret": "{clientSecret}"
-                }
-            })
             alert("Compression success flag disagrees with the byte count.")
             stop()
         }
-        @notice = "Below 20 MB. Attempts: {attempts}."
+        @notice = "Below 20 MB."
     } else {
         if metTarget.number == 1 {
-            rawAction("is.workflow.actions.downloadurl", {
-                "WFURL": "{@statusURL}",
-                "WFHTTPMethod": "DELETE",
-                "WFHTTPHeaders": {
-                    "CF-Access-Client-Id": "{clientID}",
-                    "CF-Access-Client-Secret": "{clientSecret}"
-                }
-            })
             alert("Compression success flag disagrees with the byte count.")
             stop()
         }
-        @notice = "Could not produce a valid result below 20 MB. This is the smallest valid candidate. Attempts: {attempts}."
+        @notice = "Could not produce a valid result below 20 MB. This is the smallest valid candidate."
     }
 }
 const inputByteNumber = number(inputBytes)
@@ -249,12 +229,4 @@ if @keep == false {
 wait(1)
 const downloaded = downloadURL(@contentURL, {"CF-Access-Client-Id": "{clientID}", "CF-Access-Client-Secret": "{clientSecret}"})
 const namedOutput = setName(downloaded, "{@outputFileName}")
-rawAction("is.workflow.actions.downloadurl", {
-    "WFURL": "{@statusURL}",
-    "WFHTTPMethod": "DELETE",
-    "WFHTTPHeaders": {
-        "CF-Access-Client-Id": "{clientID}",
-        "CF-Access-Client-Secret": "{clientSecret}"
-    }
-})
 share(namedOutput)

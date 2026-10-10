@@ -309,8 +309,9 @@ async def test_delete_during_blocked_persistence_cannot_resurrect_directory(
     release_write = threading.Event()
 
     def blocked_write(path: Path, payload: object, mode: int = 0o600) -> None:
-        write_started.set()
-        assert release_write.wait(5)
+        if path.name == "history.json":
+            write_started.set()
+            assert release_write.wait(5)
         original_write(path, payload, mode)
 
     monkeypatch.setattr(jobs_module, "_atomic_write_json", blocked_write)
@@ -341,8 +342,9 @@ async def test_persistence_failure_becomes_safe_failure_and_worker_continues(
 
     def fail_once(path: Path, payload: object, mode: int = 0o600) -> None:
         nonlocal calls
-        calls += 1
-        if calls == 1:
+        if path.name == "history.json":
+            calls += 1
+        if path.name == "history.json" and calls == 1:
             raise OSError("simulated persistence failure")
         original_write(path, payload, mode)
 

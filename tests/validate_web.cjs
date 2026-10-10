@@ -82,7 +82,15 @@ async function main() {
     await page.getByRole("button", { name: "Discard result" }).click();
     await $("drop-zone").waitFor({ state: "visible" });
   }
-  async function ready() { await $("result-view").waitFor({ state: "visible", timeout: 60000 }); }
+  async function ready() {
+    await page.waitForFunction(() => !document.querySelector("#result-view").hidden || !document.querySelector("#estimate-review").hidden || !document.querySelector("#error-view").hidden, null, { timeout: 60000 });
+    if (await $("error-view").isVisible()) throw new Error(await $("error-detail").innerText());
+    if (await $("estimate-review").isVisible()) {
+      await $("start-job-button").click();
+      await $("progress-view").waitFor({ state: "visible" });
+    }
+    await $("result-view").waitFor({ state: "visible", timeout: 90000 });
+  }
   async function download(name) {
     const pending = page.waitForEvent("download");
     await $("download-button").click();
@@ -179,6 +187,8 @@ async function main() {
     await $("resolution-select").selectOption("480p");
     await screenshot("video-workspace");
     await $("convert-button").click();
+    await $("estimate-review").waitFor({ state: "visible" });
+    await $("start-job-button").click();
     await $("progress-view").waitFor({ state: "visible" });
     await screenshot("mobile-progress");
     await noOverflow("progress mobile");
@@ -205,6 +215,8 @@ async function main() {
     await pick(video);
     await page.getByRole("radio", { name: "webm WebM (VP9)", exact: true }).check();
     await $("convert-button").click();
+    await $("estimate-review").waitFor({ state: "visible" });
+    await $("start-job-button").click();
     await $("progress-view").waitFor({ state: "visible" });
     await $("cancel-button").click();
     await $("drop-zone").waitFor({ state: "visible" });
@@ -258,8 +270,8 @@ async function main() {
       for (const name of names) for (const request of await (await caches.open(name)).keys()) paths.push(new URL(request.url).pathname + new URL(request.url).search);
       return { names, paths };
     });
-    assert.ok(cached.names.includes("media-manager-shell-history1"));
-    assert.ok(cached.paths.includes("/assets/app.css?v=history1"));
+    assert.ok(cached.names.includes("media-manager-shell-workflows2"));
+    assert.ok(cached.paths.includes("/assets/app.css?v=workflows2"));
     assert.equal(cached.paths.some(p => p.startsWith("/v1/")), false);
     await page.reload();
     await $("drop-zone").waitFor({ state: "visible" });

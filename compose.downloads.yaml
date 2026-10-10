@@ -1,0 +1,15 @@
+# Downloader-only overlay; Telegram can remain entirely unconfigured.
+services:
+  api:
+    env_file:
+      - ${MEDIA_MANAGER_INTEGRATIONS_ENV_FILE:?Set an owner-only runtime env file}
+    environment:
+      MEDIA_MANAGER_METUBE_SIDECAR_URL: ${MEDIA_MANAGER_METUBE_SIDECAR_URL:-http://metube-sidecar:8080}
+    networks:
+      - default
+      - metube
+
+networks:
+  metube:
+    external: true
+    name: ${MEDIA_MANAGER_METUBE_NETWORK:?Set the existing sidecar network name}

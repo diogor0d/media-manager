@@ -16,19 +16,23 @@ from fastapi.responses import FileResponse, JSONResponse
 from media_manager import __version__
 from media_manager.auth import Authenticator, Principal, get_principal
 from media_manager.config import Settings
-from media_manager.errors import ApiError
+from media_manager.errors import ApiError, ProcessingError
+from media_manager.integration_models import DownloadRequest
 from media_manager.jobs import JobManager, Processor
 from media_manager.models import (
     AudioMode,
     Capabilities,
     CapabilityOption,
     CompressionJobView,
+    CompressionOptions,
     ConversionOptions,
     ErrorBody,
     ErrorResponse,
-    HistoryEntry,
+    EstimateView,
     HistorySettings,
     JobView,
+    MediaMetadata,
+    ProcessingRequest,
     Quality,
     QualityScale,
     Resolution,
@@ -36,6 +40,8 @@ from media_manager.models import (
     UploadView,
 )
 from media_manager.processor import COMPRESSION_TARGET_BYTES, MediaProcessor, target_capabilities
+from media_manager.telegram import TelegramService
+from media_manager.workflows import DownloadManager
 
 PrincipalDependency = Annotated[Principal, Depends(get_principal)]
 TargetQuery = Annotated[Target, Query()]
@@ -57,15 +63,27 @@ def create_app(
     resolved_processor = processor or MediaProcessor(resolved_settings)
     manager = JobManager(resolved_settings, resolved_processor)
     authenticator = Authenticator(resolved_settings)
+    downloads = DownloadManager(resolved_settings, manager, resolved_processor)
+    telegram = TelegramService(resolved_settings, manager, downloads, resolved_processor)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         app.state.jobs = manager
         app.state.authenticator = authenticator
+        app.state.downloads = downloads
+        app.state.telegram = telegram
         await manager.start()
         try:
+            if resolved_settings.metube_sidecar_url or downloads._registry.exists():
+                await downloads.start()
+            if resolved_settings.telegram_bot_token:
+                await telegram.start()
+            manager.event_sink = telegram.notify
+            downloads.event_sink = telegram.notify
             yield
         finally:
+            await telegram.stop()
+            await downloads.stop()
             await manager.stop()
 
     app = FastAPI(
@@ -130,6 +148,11 @@ def create_app(
         body = ErrorResponse(
             error=ErrorBody(code="INVALID_REQUEST", message="Request parameters are invalid")
         )
+        return JSONResponse(status_code=422, content=body.model_dump(mode="json"))
+
+    @app.exception_handler(ProcessingError)
+    async def inspection_error_handler(_request: Request, exc: ProcessingError) -> JSONResponse:
+        body = ErrorResponse(error=ErrorBody(code=exc.code, message=exc.message))
         return JSONResponse(status_code=422, content=body.model_dump(mode="json"))
 
     @app.get("/health/live", include_in_schema=False)
@@ -221,6 +244,7 @@ def create_app(
             ),
             result_ttl_seconds=manager.retention_seconds(principal.id),
             compression_target_bytes=COMPRESSION_TARGET_BYTES,
+            downloads_enabled=await downloads.available(),
         )
 
     @app.get(
@@ -254,16 +278,122 @@ def create_app(
 
     @app.get(
         "/v1/history",
-        response_model=dict[str, list[HistoryEntry] | int],
         responses={401: {"model": ErrorResponse}},
     )
     async def get_history(
         principal: PrincipalDependency,
         limit: int = Query(default=50, ge=1, le=100),
         offset: int = Query(default=0, ge=0),
-    ) -> dict[str, list[HistoryEntry] | int]:
-        items, total = await manager.history(principal.id, limit, offset)
-        return {"items": items, "total": total}
+    ) -> dict:
+        # Merge before pagination so remote downloads and local processing share a timeline.
+        async def collect(source):
+            result = []
+            total = 0
+            for position in range(0, offset + limit, 100):
+                page, total = await source(
+                    principal.id, min(100, offset + limit - position), position
+                )
+                result.extend(page)
+                if len(result) >= total:
+                    break
+            return result, total
+
+        items, local_total = await collect(manager.history)
+        remote, remote_total = await collect(downloads.history)
+        combined = [item.model_dump(mode="json") for item in items] + remote
+        combined.sort(key=lambda entry: entry["job"]["created_at"], reverse=True)
+        return {"items": combined[offset:offset + limit], "total": local_total + remote_total}
+
+    @app.post("/v1/downloads", status_code=202)
+    async def create_download(
+        request: Request, body: DownloadRequest, principal: PrincipalDependency
+    ):
+        _validate_processing_options(body.conversion_options, body.compression_options)
+        return await downloads.create(body, principal.id, origin=_request_origin(request))
+
+    @app.get("/v1/downloads/{download_id}")
+    async def get_download(download_id: str, principal: PrincipalDependency):
+        return await downloads.get(download_id, principal.id)
+
+    @app.get("/v1/downloads/{download_id}/content")
+    async def download_remote(
+        download_id: str, principal: PrincipalDependency, preview: bool = False
+    ) -> FileResponse:
+        path, filename, media_type = await downloads.download(download_id, principal.id)
+        if not preview:
+            view = await downloads.get(download_id, principal.id)
+            await telegram.notify(
+                "download", download_id, resolved_settings.owner_id(principal.id),
+                filename, path.stat().st_size, view.expires_at,
+            )
+        return FileResponse(path, filename=filename, media_type=media_type)
+
+    @app.delete("/v1/downloads/{download_id}", status_code=204)
+    async def delete_download(download_id: str, principal: PrincipalDependency) -> Response:
+        await downloads.delete(download_id, principal.id)
+        return Response(status_code=204)
+
+    @app.post("/v1/downloads/{download_id}/process", status_code=201)
+    async def process_download(
+        download_id: str, body: ProcessingRequest, principal: PrincipalDependency
+    ):
+        _validate_processing_options(body.conversion_options, body.compression_options)
+        return await downloads.process(
+            download_id, principal.id,
+            conversion_options=body.conversion_options,
+            compression_options=body.compression_options,
+            auto_start=body.auto_start,
+        )
+
+    @app.get("/v1/jobs/{job_id}/inspect", response_model=MediaMetadata)
+    @app.get("/v1/compressions/{job_id}/inspect", response_model=MediaMetadata)
+    async def inspect_job(job_id: str, principal: PrincipalDependency) -> MediaMetadata:
+        return await manager.inspect(job_id, principal.id)
+
+    @app.post("/v1/jobs/{job_id}/estimate", response_model=EstimateView)
+    @app.post("/v1/compressions/{job_id}/estimate", response_model=EstimateView)
+    async def estimate_job(
+        job_id: str, body: ProcessingRequest, principal: PrincipalDependency
+    ) -> EstimateView:
+        _validate_processing_options(body.conversion_options, body.compression_options)
+        view = await manager.get(job_id, principal.id)
+        conversion = body.conversion_options
+        compression = body.compression_options
+        if conversion is None and compression is None:
+            if isinstance(view, CompressionJobView):
+                compression = view.options or CompressionOptions()
+            else:
+                conversion = ConversionOptions(
+                    target=view.target, quality_percent=view.quality_percent,
+                    resolution=view.resolution, audio=view.audio,
+                )
+        return await manager.estimate(job_id, principal.id, conversion, compression)
+
+    @app.get("/v1/jobs/{job_id}/estimate", response_model=EstimateView)
+    @app.get("/v1/compressions/{job_id}/estimate", response_model=EstimateView)
+    async def get_estimate(job_id: str, principal: PrincipalDependency) -> EstimateView:
+        return await manager.latest_estimate(job_id, principal.id)
+
+    @app.post("/v1/jobs/{job_id}/start", status_code=202)
+    @app.post("/v1/compressions/{job_id}/start", status_code=202)
+    async def start_prepared(
+        job_id: str, body: ProcessingRequest, principal: PrincipalDependency
+    ):
+        _validate_processing_options(body.conversion_options, body.compression_options)
+        view = await manager.get(job_id, principal.id)
+        compression = body.compression_options
+        if compression is None and body.conversion_options is None and isinstance(
+            view, CompressionJobView
+        ):
+            compression = view.options or CompressionOptions()
+        return await manager.start_prepared(
+            job_id, principal.id, body.conversion_options, compression
+        )
+
+    @app.post("/v1/uploads/{job_id}/prepare", status_code=201)
+    async def prepare_upload(job_id: str, principal: PrincipalDependency):
+        upload = await manager.upload_view(job_id, principal.id)
+        return await manager.prepare(job_id, upload.offset)
 
     @app.post(
         "/v1/uploads",
@@ -307,6 +437,7 @@ def create_app(
             upload_length,
             _source_filename(request),
         )
+        job.origin = _request_origin(request)
         try:
             try:
                 async with aiofiles.open(job.input_path, "xb"):
@@ -455,6 +586,7 @@ def create_app(
         quality_percent: QualityPercentQuery = None,
         resolution: ResolutionQuery = Resolution.SOURCE,
         audio: AudioQuery = AudioMode.KEEP,
+        prepare_only: bool = False,
     ) -> JobView:
         _validate_options(target, resolution, audio)
         content_length = _validate_upload_headers(
@@ -475,6 +607,7 @@ def create_app(
             content_length,
             _source_filename(request),
         )
+        job.origin = _request_origin(request)
         received = 0
 
         try:
@@ -516,6 +649,8 @@ def create_app(
 
             if received == 0:
                 raise ApiError(422, "EMPTY_INPUT", "Upload body is empty")
+            if prepare_only:
+                return await manager.prepare(job.id, received)
             return await manager.enqueue(job.id, received)
         except BaseException:
             await manager.discard(job.id)
@@ -539,8 +674,9 @@ def create_app(
     async def create_compression(
         request: Request,
         principal: PrincipalDependency,
+        prepare_only: bool = False,
     ) -> CompressionJobView:
-        if request.query_params:
+        if set(request.query_params) - {"prepare_only"}:
             raise ApiError(422, "INVALID_OPTIONS", "Compression does not accept options")
         content_length = _validate_upload_headers(request, resolved_settings.max_upload_bytes)
         job = await manager.reserve_compression(
@@ -548,6 +684,7 @@ def create_app(
             content_length,
             _source_filename(request),
         )
+        job.origin = _request_origin(request)
         received = 0
         try:
             try:
@@ -587,7 +724,10 @@ def create_app(
             await _chmod_private(job.input_path)
             if received == 0:
                 raise ApiError(422, "EMPTY_INPUT", "Upload body is empty")
-            view = await manager.enqueue(job.id, received)
+            view = (
+                await manager.prepare(job.id, received) if prepare_only
+                else await manager.enqueue(job.id, received)
+            )
             assert isinstance(view, CompressionJobView)
             return view
         except BaseException:
@@ -620,8 +760,11 @@ def create_app(
     async def download_job(
         job_id: str,
         principal: PrincipalDependency,
+        preview: bool = False,
     ) -> FileResponse:
         path, filename, media_type = await manager.download(job_id, principal.id, False)
+        if not preview:
+            await manager.notify_download(job_id, principal.id)
         return FileResponse(path=path, filename=filename, media_type=media_type)
 
     @app.delete(
@@ -662,8 +805,11 @@ def create_app(
     async def download_compression(
         job_id: str,
         principal: PrincipalDependency,
+        preview: bool = False,
     ) -> FileResponse:
         path, filename, media_type = await manager.download(job_id, principal.id, True)
+        if not preview:
+            await manager.notify_download(job_id, principal.id)
         return FileResponse(path=path, filename=filename, media_type=media_type)
 
     @app.delete(
@@ -679,6 +825,19 @@ def create_app(
         return Response(status_code=204)
 
     return app
+
+
+def _validate_processing_options(
+    conversion: ConversionOptions | None, compression: CompressionOptions | None
+) -> None:
+    if conversion is not None:
+        _validate_options(
+            conversion.target,
+            compression.resolution if compression else conversion.resolution,
+            compression.audio if compression else conversion.audio,
+        )
+    elif compression is not None and compression.target is not None:
+        _validate_options(compression.target, compression.resolution, compression.audio)
 
 
 def _validate_options(target: Target, resolution: Resolution, audio: AudioMode) -> None:
@@ -798,6 +957,11 @@ def _web_file(
 def _origin(url: str) -> str:
     parts = urlsplit(url)
     return f"{parts.scheme}://{parts.netloc}".lower()
+
+
+def _request_origin(request: Request) -> str:
+    value = request.headers.get("X-Media-Source", "api")
+    return value if value in {"web", "shortcut", "api"} else "api"
 
 
 def _is_cross_site(request: Request, allowed_origin: str) -> bool:

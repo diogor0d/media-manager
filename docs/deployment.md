@@ -28,7 +28,7 @@ approved browser or iOS device
 | Public ingress | Dedicated HTTPS hostname through an existing host-managed Tunnel connector |
 | Edge policy | Cloudflare Access interactive identity for browsers and `Service Auth` for iOS automation |
 | Origin auth | Access JWT signature, issuer, audience, expiry, and principal validation |
-| Persistence | Private host work directory; completed results and retention settings survive restart, incomplete jobs do not |
+| Persistence | Private host work directory; accepted jobs, completed results, integration records, and retention settings survive restart; partial uploads do not |
 | Backup | Work directory excluded by design; result history is temporary and is lost if the bind is lost |
 | Resources | Initial ceiling: 2 CPUs, 2 GiB RAM/no extra swap, 128 PIDs |
 | Logs | Docker local driver, 10 MiB x 3; no access log or media/credential content |
@@ -53,6 +53,39 @@ The server receives only non-secret Access metadata:
 - `MEDIA_MANAGER_WORK_DIR_HOST`;
 - `MEDIA_MANAGER_CF_ISSUER`;
 - `MEDIA_MANAGER_CF_AUDIENCE`.
+
+Optional integrations are disabled unless configured. The MeTube bridge uses
+`MEDIA_MANAGER_METUBE_SIDECAR_URL` and, when required by that service,
+`MEDIA_MANAGER_METUBE_SIDECAR_API_KEY`. With a configured key, the bridge uses
+the additive `/internal/jobs` routes, authenticated against the sidecar's
+`SIDECAR_BRIDGE_API_KEY`. Existing `/jobs` clients retain their previous
+authentication behavior. The bridge sends its key in `X-Sidecar-Bridge-Key`;
+keep its value in the server's protected environment and
+never in Git, logs, or diagnostics. Before enabling downloads, configure the
+sidecar's request-ID behavior to accept and correlate the bridge's UUID
+`request_id`, and verify duplicate submissions return the existing job without
+starting a second download. The current bridge writes its local reservation
+before submitting and will not repeat a submission after an ambiguous result.
+The additive companion sidecar patch and disposable download/correlation checks
+passed locally. Production sidecar activation and verification remain pending.
+
+The optional Telegram bot uses `MEDIA_MANAGER_TELEGRAM_BOT_TOKEN`,
+`MEDIA_MANAGER_TELEGRAM_CHAT_ID`, `MEDIA_MANAGER_TELEGRAM_USER_ID`, and
+`MEDIA_MANAGER_TELEGRAM_OWNER_ID`; the owner must be a `user:` identity. Keep
+the bot token private and configure a private chat and one authorized user.
+`MEDIA_MANAGER_TELEGRAM_FILE_ROOT` is only needed when Telegram local-file
+sharing is intentionally configured. `MEDIA_MANAGER_TELEGRAM_API_BASE_URL`
+defaults to Telegram's API origin and should only be changed for an explicitly
+controlled compatible endpoint. Bot/configuration setup is pending; do not
+infer that the bot is live from application code or synthetic tests.
+
+`MEDIA_MANAGER_PRINCIPAL_OWNERS` is an optional JSON object mapping
+`user:<subject>` or `service:<common_name>` identities to a canonical
+`user:<owner>` identity. Use it to make an authorized device/service and the
+interactive user share one private history. Review mappings carefully; they
+grant those credentials access to the same owner's jobs, downloads, and
+retention settings. Do not map one owner to another source alias or use the
+setting as a substitute for Access policy.
 
 The Cloudflare service-token client ID and secret belong on the authorized iOS
 device only. They must never be placed in server `.env`, Compose, Git, an image,
@@ -88,6 +121,8 @@ Do not deploy until all of these are resolved:
    and authenticated synthetic monitoring. Test alert delivery.
 10. Prepare the credential-free Shortcut and complete the on-device release
     matrix over Wi-Fi and cellular with disposable media and credentials.
+11. Before enabling MeTube or Telegram, complete the integration-specific
+    configuration and acceptance steps in [workflows.md](workflows.md).
 
 ## Local artifact validation
 
@@ -138,11 +173,12 @@ These steps are a runbook, not standing authorization:
    route, Access policy type, resource baseline, and remaining gaps wherever you
    track infrastructure state.
 
-Expected application downtime is only the container replacement interval.
-In-flight jobs are cancelled on restart. Unexpired completed results and history
-settings survive container replacement when the same work-directory bind is kept.
-Before deploying history, verify disk headroom for retained outputs and preserve
-the work directory; reverting to older releases that wipe it will lose history.
+The container replacement interrupts active work, but accepted prepared,
+queued, and processing jobs are recovered from the work directory. Processing
+jobs are retried at most twice across restarts. Incomplete chunked uploads are
+not recovered. Unexpired results, safe job metadata, integration records, and
+history settings survive container replacement when the same work-directory
+bind is kept. Verify disk headroom and preserve this directory.
 
 ## Validation matrix
 
@@ -163,6 +199,10 @@ the work directory; reverting to older releases that wipe it will lose history.
 | Compression | Video, image, and audio select the documented canonical outputs; sub-20 MB and over-target results report measured status correctly; cancellation removes every attempt directory |
 | Logs | No token, assertion, header, media content, source filename, metadata, or raw FFmpeg error is present |
 | History | Completed results survive restart; history/settings are isolated by principal; retained jobs do not block new work |
+| Prepared jobs | Accepted review jobs survive restart; interrupted processing is retried at most twice; partial uploads are not claimed as durable |
+| Estimates | Fast estimate, bounded refinement, option changes, and fallback/null ETA behave correctly on representative fixtures |
+| Downloads | Sidecar request-ID correlation prevents duplicate submissions; ambiguous submissions are polled and eventually reported without resubmission |
+| Telegram | Private-chat/user authorization, result delivery, duplicate-update handling, restart state, and cleanup pass with a disposable bot and account |
 | Cleanup | Explicit delete and expiry remove results; restart removes incomplete jobs while retaining unexpired history; failed jobs retain only safe metadata |
 | iOS | Signed-file/iCloud import, Wi-Fi/cellular upload, polling, exact size preview, cancel-before-download, save/share, expiry, and bad-token cases pass |
 | Monitoring | Local health, authenticated external check, restart, resource, and disk alerts reach the owner |
@@ -177,26 +217,33 @@ stability; logs expose sensitive data; or rollback cannot be performed.
 
 ## Rollback
 
-The service has no migration or authoritative runtime data. Rollback is:
+Do not start an older application image against the same work directory until
+its compatibility with the current accepted-job and integration records is
+explicitly established. Older startup cleanup may treat newer job directories
+as orphans and delete pending work. A blind rollback can therefore destroy
+accepted jobs or integration results even when the volume is preserved.
 
-1. Restore the previous reviewed Compose/source revision and image digest.
-2. Recreate only the `media-manager` service.
-3. Repeat local health, Access allow/deny, origin exposure, resource, and cleanup
-   checks.
-4. If the new public route or policy caused the failure, restore its recorded
-   previous state or remove the new route through an authorized Cloudflare
-   change.
+Before any rollback to an older image, drain new submissions, stop the service,
+take and verify a private snapshot of the complete work directory, and identify
+all pending job/integration records. Either use a reader known to preserve
+those records or explicitly remove/export the exact pending state before the
+older image scans the directory; document the expected loss and confirm the
+older image's compatibility behavior first. If those conditions cannot be met,
+do not perform the rollback. Preserve the snapshot independently and do not
+delete it as part of routine rollback.
 
-Do not delete the host work directory during rollback. Its contents are
-disposable, but deletion should be a separate explicit retention/decommission
-decision.
+After a compatibility-safe rollback, recreate only the `media-manager` service
+and repeat health, Access allow/deny, origin exposure, resource, and cleanup
+checks. If a public route or policy caused the failure, restore its recorded
+previous state only through an authorized Cloudflare change.
 
 ## Operations and decommissioning
 
 Update by building a new clean revision and digest, retaining the previous image
 through the rollback window, recreating only this service, and rerunning the
 validation matrix. Rebuild promptly for FFmpeg, Python, Alpine, FastAPI, PyJWT,
-and cryptography security updates.
+and cryptography security updates. A retained old image is not by itself proof
+that its startup cleanup is safe for the newer work-directory contents.
 
 For decommissioning, first stop distributing the Shortcut, remove the Access
 application/Tunnel route/DNS in the approved order, revoke every per-device

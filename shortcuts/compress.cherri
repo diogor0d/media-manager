@@ -4,5 +4,5 @@
 #include 'setup.cherri'
 @resource = "compressions"
 @compress = true
-@createURL = "{baseURL}/v1/compressions"
+@createURL = "{baseURL}/v1/compressions?prepare_only=true"
 #include 'job.cherri'

@@ -166,7 +166,7 @@ async def test_gif_accepts_still_images_and_short_animations(tmp_path: Path) -> 
     animation = tmp_path / "two-frame.gif"
     subprocess.run(
         [ffmpeg, "-hide_banner", "-loglevel", "error", "-i", str(fixtures["video"]),
-         "-frames:v", "2", "-an", str(animation)],
+         "-vf", "fps=10", "-frames:v", "2", "-an", str(animation)],
         check=True, capture_output=True,
     )
     processor = MediaProcessor(Settings(

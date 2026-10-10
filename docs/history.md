@@ -1,5 +1,33 @@
 # Project History
 
+## 2026-10-09 - Prepared processing, estimates, and private integrations
+
+- Added prepared conversion/compression flows with a separate estimate and
+  explicit start action. Estimates expose bounded size/time ranges and may
+  remain low-confidence or omit ETA; they are not exact-output promises.
+- Added download workflows that connect a MeTube source record (`parent_id`)
+  with an optional conversion/compression child (`child_id`), and joined
+  downloads with jobs in per-owner history. Added optional private Telegram
+  file/URL workflows, job updates, and result delivery.
+- Accepted prepared, queued, and processing jobs are persisted for restart;
+  processing recovery is limited to two retries. The default output retention
+  remains seven days, with per-owner settings from one to 90 days. Chunked
+  uploads are temporary live-process sessions and are not restart-recoverable.
+- Source URLs are not written to the download registry or Telegram session
+  state. Added backward-compatible MeTube request-ID correlation and validated
+  all four pipelines with disposable real MeTube downloads, restart, retained
+  originals, deletion, and expiry. Local checks passed: 125 Python, 33 web,
+  13 Shortcut, and 20 sidecar tests; Chromium/WebKit responsive and real media
+  flows; official local Bot API build and offline checks. See the
+  [dated acceptance record](validation-implementation-2026-10-09.md).
+- Telegram private configuration/live delivery, physical-device acceptance,
+  installed Shortcut replacement, and production activation remain separate
+  pending gates. Fully received review sources use owner retention; incomplete
+  uploads retain their shorter deadline.
+- Older-version rollback against the same work directory is unsafe until the
+  older startup cleanup and record compatibility are verified; see
+  [the deployment rollback procedure](deployment.md#rollback).
+
 ## 2026-09-04T03:15:18+01:00 - Progress, iPhone PWA, and Fast Shortcuts
 
 Recall period: September 2026

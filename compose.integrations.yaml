@@ -1,0 +1,71 @@
+# Optional overlay. The base deployment remains usable without Telegram/MeTube.
+# Requires private runtime files and the existing MeTube sidecar's Docker network.
+services:
+  api:
+    env_file:
+      - ${MEDIA_MANAGER_INTEGRATIONS_ENV_FILE:?Set an owner-only runtime env file}
+    environment:
+      MEDIA_MANAGER_METUBE_SIDECAR_URL: ${MEDIA_MANAGER_METUBE_SIDECAR_URL:-http://metube-sidecar:8080}
+      MEDIA_MANAGER_TELEGRAM_API_BASE_URL: http://telegram-bot-api:8081
+      MEDIA_MANAGER_TELEGRAM_FILE_ROOT: /telegram
+    networks:
+      - default
+      - integrations
+      - metube
+    volumes:
+      - type: bind
+        source: ${TELEGRAM_DATA_DIR_HOST:?Pre-create the private Telegram storage directory}
+        target: /telegram
+        read_only: true
+        bind:
+          create_host_path: false
+
+  telegram-bot-api:
+    profiles: [telegram]
+    image: ${TELEGRAM_API_IMAGE:-media-manager-telegram-api:local}
+    build:
+      context: .
+      dockerfile: deploy/telegram/Dockerfile
+    init: true
+    restart: unless-stopped
+    user: "10001:10001"
+    env_file:
+      - ${TELEGRAM_APPLICATION_ENV_FILE:?Set an owner-only Telegram application env file}
+    environment:
+      TELEGRAM_CACHE_TTL_SECONDS: ${TELEGRAM_CACHE_TTL_SECONDS:-604800}
+    networks:
+      - integrations
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=128m,uid=10001,gid=10001,mode=1777
+    volumes:
+      - type: bind
+        source: ${TELEGRAM_DATA_DIR_HOST:?Pre-create the private Telegram storage directory}
+        target: /telegram
+        bind:
+          create_host_path: false
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    pids_limit: 128
+    mem_limit: 1g
+    memswap_limit: 1g
+    cpus: 1.0
+    stop_grace_period: 30s
+    healthcheck:
+      test: [CMD, python, /usr/local/bin/telegram-service.py, health]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    logging:
+      driver: local
+      options:
+        max-size: 10m
+        max-file: "3"
+
+networks:
+  # Private, unpublished bridge; outbound access is required for Telegram polling.
+  integrations:
+  metube:
+    external: true
+    name: ${MEDIA_MANAGER_METUBE_NETWORK:?Set the existing sidecar network name}

@@ -6,6 +6,23 @@
 #question apiQuestion "API Base URL (HTTPS origin, no trailing slash)" ""
 #question idQuestion "Access Client ID (per-device service token)" ""
 #question secretQuestion "Access Client Secret" ""
+const providedInputCount = count(ShortcutInput)
+@inputFile = ShortcutInput
+if providedInputCount == 0 {
+    menu "Choose media from" {
+        item "Photos":
+            @inputFile = selectPhotos(false)
+        item "Files":
+            @inputFile = selectFile(false)
+    }
+}
+const inputCount = count(@inputFile)
+if inputCount != 1 {
+    alert("Select exactly one file.")
+    stop()
+}
+const inputName = getName(@inputFile)
+const uploadFilename = urlEncode("{inputName}")
 const baseURL = text(apiQuestion)
 const clientID = text(idQuestion)
 const clientSecret = text(secretQuestion)
@@ -30,19 +47,3 @@ if !validClientID || !validClientSecret {
     alert("Fill in both Access service-token fields without whitespace.")
     stop()
 }
-@inputFile = ShortcutInput
-if !@inputFile {
-    menu "Choose media from" {
-        item "Photos":
-            @inputFile = selectPhotos(false)
-        item "Files":
-            @inputFile = selectFile(false)
-    }
-}
-const inputCount = count(@inputFile)
-if inputCount != 1 {
-    alert("Select exactly one file.")
-    stop()
-}
-const inputName = getFileDetail(@inputFile, "Name")
-const uploadFilename = urlEncode("{inputName}")

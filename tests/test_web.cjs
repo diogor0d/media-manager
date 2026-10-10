@@ -16,8 +16,9 @@ function harness(fetchImpl, storage = memoryStorage()) {
   const intervals = [];
   const makeElement = () => ({
     hidden: true, disabled: false, value: "", textContent: "", firstChild: { textContent: "" }, lastChild: { textContent: "" },
+    children: [],
     style: {}, dataset: {}, classList: { add() {}, remove() {}, toggle() {} },
-    setAttribute() {}, removeAttribute() {}, addEventListener() {}, append() {}, replaceChildren() {},
+    setAttribute() {}, removeAttribute() {}, addEventListener() {}, append(...children) { this.children.push(...children); }, replaceChildren(...children) { this.children = children; },
     querySelector() { return null; }, querySelectorAll() { return []; }, matches() { return false; },
     focus() {}, click() {}, scrollIntoView() {}, reportValidity() {},
   });
@@ -38,7 +39,7 @@ function harness(fetchImpl, storage = memoryStorage()) {
     sessionStorage: storage, fetch: fetchImpl, URL, URLSearchParams, DOMException, File: class File {},
     XMLHttpRequest: class {}, console, setTimeout, clearTimeout,
   };
-  vm.runInNewContext(`${source}\nglobalThis.__app = { state, historyState, loadHistory, saveRetention, deleteHistoryEntry, discardResult, restoreJob, pollJob, startConversion, continueUpload, showResult, reset, shareResult, updateExpiry, resumeAfterReconnect };`, context);
+  vm.runInNewContext(`${source}\nglobalThis.__app = { state, historyState, loadHistory, saveRetention, deleteHistoryEntry, discardResult, restoreJob, pollJob, startConversion, continueUpload, showResult, reset, shareResult, updateExpiry, resumeAfterReconnect, requestEstimate, startPreparedJob, startDownload, pollDownload, renderHistory, validateStatusUrl, buildProcessingOptions, updateDownloadWorkflow };`, context);
   return { app: context.__app, elements, timers, intervals, navigator: context.navigator, document, window };
 }
 
@@ -55,6 +56,7 @@ test("starting another file preserves a ready result but cancelling an unfinishe
   await app.reset();
   assert.deepEqual(deleted, []);
   app.state.jobId = "unfinished-job";
+  app.state.statusUrl = "/v1/jobs/unfinished-job";
   await app.reset();
   assert.deepEqual(deleted, ["/v1/jobs/unfinished-job"]);
 });
@@ -286,26 +288,204 @@ test("reconnect resumes a retained job status poll", async () => {
   assert.equal(app.state.result.filename, "result.webp");
 });
 
-test("a lost completion reply or UPLOAD_ALREADY_COMPLETED is recovered by checking the accepted job", async (t) => {
+test("a lost prepare reply or UPLOAD_ALREADY_COMPLETED is recovered before estimate review", async (t) => {
+  const id = "82f353b4-33ec-41dd-8466-a1a0271e398f";
+  const statusUrl = `/v1/jobs/${id}`;
+  const prepared = { ...job(id, "awaiting_review"), status_url: statusUrl };
   for (const mode of ["network", "already-completed"]) await t.test(mode, async () => {
     const calls = [];
     const { app } = harness(async (url, options = {}) => {
       calls.push([url, options.method || "GET"]);
-      if (url.endsWith("/complete")) {
+      if (url.endsWith("/prepare")) {
         if (mode === "network") throw new Error("reply lost");
         return jsonResponse(409, { error: { code: "UPLOAD_ALREADY_COMPLETED", message: "already complete" } });
       }
-      if (url === "/v1/jobs/job-1") return jsonResponse(200, job("job-1", "queued"));
+      if (url === statusUrl) return jsonResponse(200, prepared);
+      if (url === `/v1/jobs/${id}/estimate`) return jsonResponse(200, { size_min_bytes: 1, size_max_bytes: 2, eta_min_seconds: 1, eta_max_seconds: 2, method: "fast", confidence: "low", options_key: "test" });
       throw new Error(`unexpected request ${url}`);
     });
-    app.state.jobId = "job-1";
-    app.state.upload = { id: "job-1", offset: 10, length: 10, chunk_size: 50 };
+    app.state.jobId = id;
+    app.state.operation = 1;
+    app.state.upload = { id, offset: 10, length: 10, chunk_size: 50 };
     app.state.file = { name: "sample.png", size: 10, slice() { return {}; } };
     app.state.capabilities = { targets: [{ value: "image-webp", extension: "webp" }] };
     await app.continueUpload({ value: "image-webp", extension: "webp" });
-    assert.equal(calls.filter(([url, method]) => url.endsWith("/complete") && method === "POST").length, 1);
-    assert.deepEqual(calls.slice(0, 2).map(([url, method]) => [url, method]), [
-      ["/v1/uploads/job-1/complete", "POST"], ["/v1/jobs/job-1", "GET"],
+    assert.equal(calls.filter(([url, method]) => url.endsWith("/prepare") && method === "POST").length, 1);
+    assert.deepEqual(calls.slice(0, 3).map(([url, method]) => [url, method]), [
+      [`/v1/uploads/${id}/prepare`, "POST"], [statusUrl, "GET"], [`/v1/jobs/${id}/estimate`, "POST"],
     ]);
+    assert.equal(app.state.statusUrl, statusUrl);
   });
+});
+
+test("prepared jobs show an estimate before the explicit start request", async () => {
+  const id = "82f353b4-33ec-41dd-8466-a1a0271e398f";
+  const statusUrl = `/v1/jobs/${id}`;
+  const requests = [];
+  const ready = { ...job(id, "ready"), status_url: statusUrl };
+  const { app, elements } = harness(async (url, options = {}) => {
+    requests.push([url, options.method || "GET", options.body]);
+    if (url === `/v1/jobs/${id}/estimate`) return jsonResponse(200, { size_min_bytes: 100, size_max_bytes: 200, eta_min_seconds: 2, eta_max_seconds: 4, method: "fast", confidence: "low", options_key: "key-1" });
+    if (url === `/v1/jobs/${id}/start`) return jsonResponse(202, { ...job(id, "queued"), status_url: statusUrl });
+    if (url === statusUrl) return jsonResponse(200, ready);
+    throw new Error(`unexpected request ${url}`);
+  });
+  app.state.jobId = id; app.state.statusUrl = statusUrl; app.state.operation = 1;
+  app.state.capabilities = { targets: [{ value: "image-webp", extension: "webp" }] };
+  app.state.processingOptions = { conversion_options: { target: "image-webp", quality_percent: 50, resolution: "source", audio: "keep" }, compression_options: null };
+  await app.requestEstimate({ id }, false);
+  assert.equal(elements.get("#estimate-review").hidden, false);
+  assert.deepEqual(requests.map(([url, method]) => [url, method]), [[`/v1/jobs/${id}/estimate`, "POST"]]);
+  await app.startPreparedJob();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(requests.slice(1).map(([url, method]) => [url, method]), [[`/v1/jobs/${id}/start`, "POST"], [statusUrl, "GET"]]);
+  assert.equal(JSON.parse(requests[0][2]).conversion_options.target, "image-webp");
+});
+
+test("remote download submissions carry the requested kind and workflow options", async () => {
+  const id = "82f353b4-33ec-41dd-8466-a1a0271e398f";
+  const statusUrl = `/v1/downloads/${id}`;
+  const requests = [];
+  const { app, elements } = harness(async (url, options = {}) => {
+    requests.push([url, options.method || "GET", options.body]);
+    if (url === "/v1/downloads") return jsonResponse(202, { id, state: "queued", status_url: statusUrl });
+    if (url === statusUrl) return jsonResponse(200, { id, state: "awaiting_review", status_url: statusUrl, source_filename: "clip.mp4", output: { filename: "clip.mp4", bytes: 100 } });
+    throw new Error(`unexpected request ${url}`);
+  });
+  app.state.capabilities = { downloads_enabled: true };
+  const set = (selector, value, extra = {}) => elements.set(selector, { hidden: false, disabled: false, value, checked: false, textContent: "", dataset: {}, classList: { add() {}, remove() {}, toggle() {} }, setAttribute() {}, ...extra });
+  set("#media-url", "https://video.example/watch?v=1");
+  set("#download-type", "audio");
+  set("#download-quality", "720");
+  set("#download-format", "mp3");
+  set("#download-codec", "opus");
+  set("#download-workflow", "compress");
+  set("#download-auto-process", "", { checked: true });
+  set("#download-target", "audio-mp3");
+  set("#download-quality-percent", "65");
+  set("#download-resolution", "source");
+  set("#download-audio", "keep");
+  set("#download-target-bytes", "20000000");
+  set("#download-submit", "");
+  set("#download-review", "");
+  set("#download-review-detail", "");
+  set("#download-source-button", "", { href: "" });
+  set("#download-process-button", "");
+  set("#download-discard-button", "");
+  await app.startDownload({ preventDefault() {} });
+  const payload = JSON.parse(requests[0][2]);
+  assert.equal(payload.download_type, "audio");
+  assert.equal(payload.quality, "720");
+  assert.equal(payload.format, "mp3");
+  assert.equal(payload.codec, "opus");
+  assert.equal(payload.workflow, "compress");
+  assert.equal(payload.auto_process, true);
+  assert.equal(payload.compression_options.target_bytes, 20000000);
+  assert.equal(requests[1][0], statusUrl);
+  assert.match(elements.get("#download-review-detail").textContent, /Ready to review/);
+});
+
+test("ready or reviewable downloads can be processed after choosing a workflow", () => {
+  const { app, elements } = harness(async () => jsonResponse(200, {}));
+  app.state.downloadState = "ready";
+  elements.set("#download-workflow", { value: "download" });
+  elements.set(".download-process-options", { hidden: false });
+  elements.set("#download-auto-process", { disabled: false, checked: true });
+  elements.set("#download-process-button", { hidden: false });
+  app.updateDownloadWorkflow();
+  assert.equal(elements.get("#download-process-button").hidden, true);
+  elements.get("#download-workflow").value = "compress";
+  app.updateDownloadWorkflow();
+  assert.equal(elements.get("#download-process-button").hidden, false);
+  app.state.downloadState = "awaiting_review";
+  app.updateDownloadWorkflow();
+  assert.equal(elements.get("#download-process-button").hidden, false);
+});
+
+test("estimate review includes a signed size-change range and confidence", async () => {
+  const id = "82f353b4-33ec-41dd-8466-a1a0271e398f";
+  const { app, elements } = harness(async () => jsonResponse(200, {
+    size_min_bytes: 600, size_max_bytes: 1200, source: { bytes: 1000 }, confidence: "medium", method: "sampled",
+  }));
+  app.state.jobId = id; app.state.statusUrl = `/v1/jobs/${id}`; app.state.operation = 1;
+  app.state.processingOptions = {};
+  await app.requestEstimate({ id }, false);
+  assert.match(elements.get("#estimate-summary").textContent, /20% larger to 40% smaller/);
+  assert.match(elements.get("#estimate-summary").textContent, /medium confidence/);
+});
+
+test("unknown source submission is reported as confirmation, not active downloading", async () => {
+  const id = "82f353b4-33ec-41dd-8466-a1a0271e398f";
+  const { app, elements, timers } = harness(async () => jsonResponse(200, {
+    id, state: "queued", submission_unknown: true, status_url: `/v1/downloads/${id}`,
+  }));
+  app.state.downloadStatusUrl = `/v1/downloads/${id}`;
+  await app.pollDownload();
+  assert.match(elements.get("#download-review-detail").textContent, /Confirming whether the source accepted/);
+  assert.doesNotMatch(elements.get("#download-review-detail").textContent, /Downloading from the source/);
+  assert.equal(timers.length, 1);
+});
+
+test("history marks unknown source acceptance without showing a download ETA", () => {
+  const { app, elements } = harness(async () => jsonResponse(200, {}));
+  app.historyState.items = [{
+    id: "82f353b4-33ec-41dd-8466-a1a0271e398f", kind: "download", completed_at: null,
+    source_filename: "clip.mp4", job: {
+      id: "82f353b4-33ec-41dd-8466-a1a0271e398f", state: "queued", submission_unknown: true,
+      status_url: "/v1/downloads/82f353b4-33ec-41dd-8466-a1a0271e398f", processing: { eta_seconds: 30 },
+    },
+  }];
+  elements.set("#history-list", { children: [], replaceChildren() { this.children = []; }, append(...children) { this.children.push(...children); } });
+  app.renderHistory();
+  const row = elements.get("#history-list").children[0];
+  const metadata = row.children[0].children[1].textContent;
+  assert.match(metadata, /Confirming source acceptance/);
+  assert.doesNotMatch(metadata, /about .* left/);
+  assert.equal(row.children[1].children[0].textContent, "View status");
+});
+
+for (const sourceState of ["ready", "processing", "awaiting_review"]) test(`history groups original ${sourceState} and processed child with recoverable outputs`, () => {
+  const { app, elements } = harness(async () => jsonResponse(200, {}));
+  const originalId = "82f353b4-33ec-41dd-8466-a1a0271e398f";
+  const childId = "c5c993e7-983e-4cd0-b22e-1a44e45b6188";
+  app.historyState.items = [
+    { id: originalId, kind: "download", child_id: childId, completed_at: "2026-10-09T10:00:00Z", job: { id: originalId, state: sourceState, output: { filename: "source.mp4", bytes: 100 }, expires_at: "2026-10-16T10:00:00Z" } },
+    { id: childId, kind: "conversion", parent_id: originalId, completed_at: "2026-10-09T10:01:00Z", job: { id: childId, parent_id: originalId, state: "ready", output: { filename: "result.webp", bytes: 50 }, expires_at: "2026-10-16T10:01:00Z" } },
+  ];
+  elements.set("#history-list", { children: [], replaceChildren() { this.children = []; }, append(...children) { this.children.push(...children); } });
+  app.renderHistory();
+  const rows = elements.get("#history-list").children;
+  assert.equal(rows.length, 1);
+  const stages = rows[0].children[0].children.find(child => child.className === "history-lineage-stages");
+  assert.deepEqual(stages.children.map(stage => stage.textContent), ["Original · source.mp4", "Processed · result.webp · ready"]);
+  assert.ok(rows[0].children[1].children.some(action => action.textContent === "Download processed"));
+  assert.ok(rows[0].children[1].children.some(action => action.textContent === "Download source"));
+});
+
+test("processing failure keeps a recoverable original download available", async () => {
+  const id = "82f353b4-33ec-41dd-8466-a1a0271e398f";
+  const { app, elements } = harness(async () => jsonResponse(200, {
+    id, state: "awaiting_review", error: { code: "PROCESSING_FAILED", message: "Conversion failed" },
+    source_filename: "clip.mp4", status_url: `/v1/downloads/${id}`,
+    output: { filename: "clip.mp4", bytes: 100, download_url: `/v1/downloads/${id}/content` },
+  }));
+  app.state.downloadStatusUrl = `/v1/downloads/${id}`;
+  elements.set("#download-workflow", { value: "convert" });
+  elements.set("#download-process-button", { hidden: true });
+  elements.set("#download-source-button", { hidden: false, setAttribute() {} });
+  await app.pollDownload();
+  assert.equal(app.state.downloadState, "awaiting_review");
+  assert.match(elements.get("#download-review-detail").textContent, /Original download preserved/);
+  assert.match(elements.get("#download-review-detail").textContent, /Conversion failed/);
+  assert.equal(elements.get("#download-process-button").hidden, false);
+  assert.equal(elements.get("#download-source-button").href, "/v1/downloads/82f353b4-33ec-41dd-8466-a1a0271e398f/content");
+});
+
+test("status URLs reject cross-origin, mismatched, and malformed destinations", () => {
+  const { app } = harness(async () => jsonResponse(200, {}));
+  const id = "82f353b4-33ec-41dd-8466-a1a0271e398f";
+  assert.equal(app.validateStatusUrl(`/v1/compressions/${id}`, ["jobs", "compressions"], id), `/v1/compressions/${id}`);
+  assert.throws(() => app.validateStatusUrl(`https://evil.example/v1/jobs/${id}`, "jobs", id), /unsafe status URL/);
+  assert.throws(() => app.validateStatusUrl(`/v1/jobs/${id}/content`, "jobs", id), /unexpected status URL/);
+  assert.throws(() => app.validateStatusUrl("/v1/jobs/job-1", "jobs", "job-1"), /invalid job identity/);
 });

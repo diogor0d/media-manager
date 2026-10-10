@@ -2,9 +2,9 @@
 
 <img src="src/media_manager/web/logo.svg" alt="Media Manager" width="330">
 
-**A fast, self-hosted media converter for the web and iOS Share Sheet**
+**Self-hosted media downloads, conversion, and compression**
 
-Upload once · see the exact result size · download only if you want it
+Upload or submit a URL · review estimates · recover results from history
 
 [![Python](https://img.shields.io/badge/python-3.12+-3776AB?style=flat-square&logo=python&logoColor=white)](https://www.python.org)
 [![FastAPI](https://img.shields.io/badge/FastAPI-async-009688?style=flat-square&logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com)
@@ -18,7 +18,9 @@ Upload once · see the exact result size · download only if you want it
 
 ---
 
-Media Manager turns a browser drop or Share Sheet tap into a safe, bounded conversion job on your own server.
+Media Manager connects browser, Share Sheet, and optional Telegram workflows to
+background media jobs on your own server. MeTube remains the download provider;
+its existing interface and clients remain available.
 Media is treated as hostile input end to end: uploads are streamed to isolated job directories,
 inspected by content rather than filename, converted through a fixed allowlisted FFmpeg surface,
 and re-probed before they can be downloaded. Every result expires automatically.
@@ -36,8 +38,16 @@ and re-probed before they can be downloaded. Every result expires automatically.
 - **Content-based input handling** — MIME type, extension, and original filename never select a parser. Inputs are demuxed through an explicit format allowlist with protocol whitelisting locked to `file`.
 - **Hard resource ceilings** — upload/output byte caps, wall-clock timeouts per media class, dimension/duration/FPS/pixel/stream limits, one conversion at a time, disk-space admission control.
 - **Origin-verified authentication** — Cloudflare Access JWTs are validated at the origin (signature, issuer, audience, expiry), so trust comes from cryptography, not forwarded headers.
-- **Private result history** — completed conversions and compressions stay available for seven days by default, including across restarts. Adjust retention in the app or delete individual results sooner.
-- **Purpose-built compression** — one request automatically chooses MP4, WebP, or M4A and makes a bounded attempt to finish below 20 MB, reporting honestly when it cannot.
+- **Recoverable activity** — accepted jobs appear immediately in private history and continue after clients disconnect. Queued and interrupted processing resume after restart; results expire after seven days by default, with adjustable retention.
+- **Review before encoding** — prepare a source once, inspect it, choose settings, and review a size range and sampled processing estimate before starting.
+- **Advanced compression** — the 20 MB default supports a custom size target, output format, resolution cap, quality, and audio controls. An unmet target returns the smallest validated candidate with a clear result flag.
+- **Connected downloads** — submit a URL through the existing MeTube sidecar, then download, convert, compress, or combine conversion and compression. Keep original and processed files as separate recoverable outputs.
+- **Optional Telegram** — authorized private-chat files and URLs use the same jobs, review controls, history, progress, documents, and ready/download alerts. Disabled until private runtime configuration is supplied.
+
+See [workflow setup and behavior](docs/workflows.md), [API contract](docs/api.md),
+and [deployment and rollback](docs/deployment.md). Live bot, installed Shortcut,
+physical iPhone, and production acceptance are separate rollout gates.
+Current local evidence is in the [2026-10-09 acceptance record](docs/validation-implementation-2026-10-09.md).
 
 ## Architecture
 
@@ -78,6 +88,10 @@ pinned image. HEIC/HEIF, AVIF, APNG, animated WebP, exotic color profiles, and c
 POST /v1/uploads       →  201  { id, offset, chunk_size }       # authenticated session
 PATCH /v1/uploads/{id} →  200  { offset }                       # ordered raw chunks
 POST /v1/uploads/{id}/complete → 202                            # queue exact upload
+POST /v1/uploads/{id}/prepare → 201                            # review accepted source
+GET  /v1/jobs/{id}/inspect                                    # content-based metadata
+POST /v1/jobs/{id}/estimate                                   # fast range, bounded refinement
+POST /v1/jobs/{id}/start → 202                                # accept reviewed settings
 POST /v1/jobs          →  202  { id, state, status_url }        # small one-request clients
 GET  /v1/jobs/{id}     →  queued → inspect → convert → verify  # real progress
 GET  /v1/jobs/{id}/content                                    # only after you choose to
@@ -86,6 +100,8 @@ GET  /v1/capabilities                                         # option set + lim
 GET  /v1/history                                              # your retained results
 GET/PUT /v1/history/settings                                  # future result retention
 POST /v1/compressions → GET /v1/compressions/{id}             # automatic <20 MB attempt
+POST /v1/downloads → GET /v1/downloads/{id}                   # optional MeTube bridge
+POST /v1/downloads/{id}/process                               # original → processing child
 ```
 
 <details>

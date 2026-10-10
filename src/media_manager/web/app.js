@@ -2,7 +2,8 @@
 
 const $ = (selector) => document.querySelector(selector);
 const RECOVERY_KEY = "media-manager-active-job";
-const state = { capabilities: null, file: null, mediaClass: null, requestedTarget: null, objectUrl: null, jobId: null, result: null, sharing: false, upload: null, resumeAction: null, xhr: null, pollTimer: null, expiryTimer: null, operation: 0, cancelled: false, reloadOnError: false, waitingWorker: null, updateRequested: false };
+const RECOVERY_URL_KEY = "media-manager-active-status-url";
+const state = { capabilities: null, file: null, mediaClass: null, requestedTarget: null, objectUrl: null, jobId: null, statusUrl: null, processingOptions: null, result: null, sharing: false, upload: null, resumeAction: null, xhr: null, pollTimer: null, expiryTimer: null, operation: 0, cancelled: false, reloadOnError: false, waitingWorker: null, updateRequested: false, mode: "convert", workflow: "convert", downloadId: null, downloadStatusUrl: null, downloadState: null, downloadTimer: null };
 const historyState = { items: [], total: 0, request: 0, loading: false, saving: false, deleting: new Set(), timer: null, settingsLoaded: false };
 
 const extensionGroups = {
@@ -29,6 +30,8 @@ async function init() {
     updateConnectionStatus();
     $("#limit-copy").textContent = `Up to ${formatBytes(state.capabilities.max_upload_bytes)} · results expire after ${formatDuration(state.capabilities.result_ttl_seconds)}`;
     configureQualitySlider();
+    configureDownloadControls();
+    setMode("convert");
     if (await restoreJob()) return;
     announce("Converter ready");
   } catch (error) {
@@ -48,9 +51,21 @@ function bindEvents() {
   drop.addEventListener("drop", (event) => { if (converterAvailable() && event.dataTransfer.files[0]) { state.requestedTarget = null; selectFile(event.dataTransfer.files[0]); } });
   $("#replace-file").addEventListener("click", () => openFilePicker());
   $("#conversion-form").addEventListener("submit", startConversion);
+  $("#mode-switch").addEventListener("click", (event) => { const button = event.target.closest("[data-mode]"); if (button) setMode(button.dataset.mode); });
+  $("#workflow-select").addEventListener("change", () => { state.workflow = $("#workflow-select").value; updateWorkflowOptions(); });
+  $("#download-form").addEventListener("submit", startDownload);
+  $("#download-type").addEventListener("change", updateDownloadOptions);
+  $("#download-workflow").addEventListener("change", updateDownloadWorkflow);
+  $("#download-process-button").addEventListener("click", processDownloadedFile);
+  $("#download-discard-button").addEventListener("click", discardDownloadedFile);
+  $("#download-quality-percent").addEventListener("input", () => { $("#download-quality-value").textContent = `${$("#download-quality-percent").value}%`; });
+  $("#refine-estimate").addEventListener("click", refineEstimate);
+  $("#discard-prepared-button").addEventListener("click", discardPreparedJob);
+  $("#start-job-button").addEventListener("click", startPreparedJob);
   $("#target-options").addEventListener("change", updateTargetOptions);
   $("#audio-options").addEventListener("change", updateQualityDetails);
   $("#quality-slider").addEventListener("input", updateQualityDetails);
+  $("#compression-quality").addEventListener("input", () => { $("#compression-quality-value").textContent = `${$("#compression-quality").value}%`; });
   $("#cancel-button").addEventListener("click", cancelJob);
   $("#discard-button").addEventListener("click", discardResult);
   $("#another-button").addEventListener("click", () => reset(false));
@@ -64,6 +79,73 @@ function bindEvents() {
   $("#history-settings").addEventListener("submit", saveRetention);
   window.addEventListener("online", resumeAfterReconnect);
   window.addEventListener("offline", updateConnectionStatus);
+}
+
+function setMode(mode) {
+  if (!$("#estimate-review").hidden && mode !== state.mode) {
+    announce("Start or discard the prepared job before changing modes.");
+    return;
+  }
+  state.mode = mode;
+  $("#download-form").hidden = mode !== "download";
+  $("#mode-switch").querySelectorAll("[data-mode]").forEach((button) => button.setAttribute("aria-pressed", String(button.dataset.mode === mode)));
+  document.querySelector(".bench").dataset.mode = mode;
+  const downloadMode = $("#mode-switch").querySelector('[data-mode="download"]');
+  if (downloadMode) downloadMode.disabled = !state.capabilities?.downloads_enabled;
+  $("#page-title").textContent = mode === "download" ? "Download media" : mode === "compress" ? "Compress media" : "Convert media";
+  if (mode !== "download") {
+    $("#workflow-select").value = mode;
+    state.workflow = mode;
+    updateWorkflowOptions();
+  }
+}
+
+function updateWorkflowOptions() {
+  const compress = $("#workflow-select").value !== "convert";
+  const combined = $("#workflow-select").value === "convert_compress";
+  $("#compression-options").hidden = !compress;
+  $("#compression-options").open = compress;
+  $("#conversion-quality-options").hidden = combined;
+  updateTargetOptions();
+  $("#convert-button").querySelector("span").textContent = "Prepare estimate";
+}
+
+function configureDownloadControls() {
+  fillSelect("#download-target", state.capabilities.targets.map((target) => [target.value, `${target.label} (.${target.extension})`]));
+  fillSelect("#download-resolution", state.capabilities.resolutions.map((item) => [item.value, item.label]));
+  fillSelect("#download-audio", state.capabilities.audio_modes.map((item) => [item.value, item.label]));
+  fillSelect("#compression-resolution", state.capabilities.resolutions.map((item) => [item.value, item.label]));
+  fillSelect("#compression-audio", state.capabilities.audio_modes.map((item) => [item.value, item.label]));
+  updateDownloadOptions();
+  updateDownloadWorkflow();
+}
+
+function fillSelect(selector, values) {
+  const select = $(selector); select.replaceChildren();
+  values.forEach(([value, label]) => { const option = document.createElement("option"); option.value = value; option.textContent = label; select.append(option); });
+}
+
+function updateDownloadOptions() {
+  const type = $("#download-type").value;
+  const audio = type === "audio";
+  const thumbnail = type === "thumbnail";
+  $("#download-codec-field").hidden = thumbnail;
+  $("#download-quality").disabled = thumbnail;
+  $("#download-format").disabled = thumbnail;
+  if (thumbnail) { $("#download-format").value = "auto"; $("#download-codec").value = "auto"; }
+  else if (audio && ["ios", "auto"].includes($("#download-format").value)) $("#download-format").value = "audio";
+  else if (!audio && $("#download-format").value === "audio") $("#download-format").value = "ios";
+  if (audio && $("#download-codec").value === "h264") $("#download-codec").value = "aac";
+  else if (!audio && $("#download-codec").value === "aac") $("#download-codec").value = "h264";
+  $("#download-hint").textContent = thumbnail ? "Save the source thumbnail image." : audio ? "Audio downloads can be remuxed or transcoded to the selected format." : "Quality and codecs depend on the source site.";
+}
+
+function updateDownloadWorkflow() {
+  const enabled = $("#download-workflow").value !== "download";
+  $(".download-process-options").hidden = !enabled;
+  $("#download-auto-process").disabled = !enabled;
+  if (!enabled) $("#download-auto-process").checked = false;
+  $("#download-process-button").hidden = !["awaiting_review", "ready"].includes(state.downloadState) || !enabled;
 }
 
 async function registerPwa() {
@@ -151,7 +233,10 @@ async function selectFile(file) {
   }
 
   clearTimers();
+  $("#estimate-review").hidden = true;
+  setProcessingControlsDisabled(false);
   state.cancelled = false;
+  $("#convert-button").hidden = false;
   revokePreview();
   state.file = file;
   state.mediaClass = mediaClass;
@@ -250,6 +335,8 @@ function configureQualitySlider() {
   const scale = state.capabilities.quality_scale;
   const slider = $("#quality-slider");
   slider.min = scale.minimum; slider.max = scale.maximum; slider.step = scale.step; slider.value = scale.default;
+  $("#compression-quality").min = scale.minimum; $("#compression-quality").max = scale.maximum; $("#compression-quality").step = scale.step; $("#compression-quality").value = scale.default;
+  $("#compression-quality-value").textContent = `${scale.default}%`;
 }
 
 async function restoreJob() {
@@ -259,11 +346,18 @@ async function restoreJob() {
   state.cancelled = false;
   state.jobId = jobId;
   try {
-    const response = await fetch(`/v1/jobs/${encodeURIComponent(jobId)}`, { headers: { Accept: "application/json" }, cache: "no-store" });
+    const savedUrl = readRecoveryUrl();
+    if (savedUrl) {
+      const route = new URL(savedUrl, window.location.origin).pathname.match(/^\/v1\/(jobs|compressions)\//)?.[1];
+      if (route) state.statusUrl = validateStatusUrl(savedUrl, route, jobId);
+    }
+    const response = await fetch(state.statusUrl || `/v1/jobs/${encodeURIComponent(jobId)}`, { headers: { Accept: "application/json" }, cache: "no-store" });
     const job = await apiJson(response);
     if (!isCurrentOperation(operation, jobId)) return true;
+    if (job.status_url) state.statusUrl = validateStatusUrl(job.status_url, ["jobs", "compressions"], job.id);
     if (job.state === "ready") showResult(job);
     else if (job.state === "failed") { clearRecovery(); showError("This conversion stopped.", job.error?.message || "The media could not be converted."); }
+    else if (job.state === "awaiting_review") await requestEstimate(job, true);
     else {
       showView("#progress-view");
       $("#progress-view").classList.add("is-processing");
@@ -299,7 +393,7 @@ function updateTargetOptions() {
     const definition = state.capabilities.resolutions.find((item) => item.value === value);
     const option = document.createElement("option"); option.value = value; option.textContent = definition.label; resolution.append(option);
   });
-  $("#resolution-field").hidden = target.allowed_resolutions.length === 1;
+  $("#resolution-field").hidden = state.workflow === "convert_compress" || target.allowed_resolutions.length === 1;
   const audio = $("#audio-options"); audio.replaceChildren();
   target.allowed_audio_modes.forEach((value) => {
     const definition = state.capabilities.audio_modes.find((item) => item.value === value);
@@ -308,7 +402,7 @@ function updateTargetOptions() {
     const label = document.createElement("label"); label.htmlFor = input.id; label.textContent = definition.label;
     wrapper.append(input, label); audio.append(wrapper);
   });
-  $("#audio-field").hidden = target.allowed_audio_modes.length === 1;
+  $("#audio-field").hidden = state.workflow === "convert_compress" || target.allowed_audio_modes.length === 1;
   $("#convert-extension").textContent = `.${target.extension}`;
   updateQualityDetails();
 }
@@ -352,7 +446,7 @@ async function startConversion(event) {
   try {
     const createdResponse = await fetch(`/v1/uploads?${query}`, {
       method: "POST",
-      headers: { Accept: "application/json", "Upload-Length": String(state.file.size), "Upload-Filename": encodeURIComponent(state.file.name) },
+      headers: { Accept: "application/json", "X-Media-Source": "web", "Upload-Length": String(state.file.size), "Upload-Filename": encodeURIComponent(state.file.name) },
     });
     const upload = await apiJson(createdResponse);
     if (!isCurrentOperation(operation)) {
@@ -366,6 +460,205 @@ async function startConversion(event) {
   } catch (error) {
     if (isCurrentOperation(operation)) handleUploadError(error);
   }
+}
+
+function buildProcessingOptions(workflow = state.workflow, selectors = null) {
+  const target = selectors ? $(selectors.target).value : document.querySelector('input[name="target"]:checked')?.value;
+  const qualityPercent = selectors ? Number($(selectors.quality).value) : Number($("#quality-slider").value);
+  const resolution = selectors ? $(selectors.resolution).value || "source" : $("#resolution-select").value || "source";
+  const audio = selectors ? $(selectors.audio).value || "keep" : document.querySelector('input[name="audio"]:checked')?.value || "keep";
+  const conversionOptions = { target, quality_percent: qualityPercent, resolution, audio };
+  if (workflow === "download") return { conversion_options: null, compression_options: null };
+  const compressionOptions = workflow === "convert" ? null : {
+    target_bytes: Number(selectors ? $(selectors.targetBytes).value : $("#compression-target-bytes").value),
+    target, quality_percent: selectors ? qualityPercent : Number($("#compression-quality").value),
+    resolution: selectors ? resolution : $("#compression-resolution").value || "source",
+    audio: selectors ? audio : $("#compression-audio").value || "keep",
+  };
+  if (workflow === "compress") return { conversion_options: null, compression_options: compressionOptions };
+  if (workflow === "convert_compress") return { conversion_options: conversionOptions, compression_options: compressionOptions };
+  return { conversion_options: conversionOptions, compression_options: null };
+}
+
+async function requestEstimate(job, refined = false) {
+  const id = job.id || state.jobId;
+  const options = state.processingOptions || buildProcessingOptions();
+  const route = state.statusUrl || validateStatusUrl(job.status_url, ["jobs", "compressions"], id);
+  state.statusUrl = route;
+  setProgress("ESTIMATING", "Review the processing estimate…", "The server is preparing a size and time range before work starts.");
+  $("#progress-view").classList.remove("is-processing");
+  try {
+    const endpoint = `${jobApiUrl(id)}/estimate`;
+    const response = refined
+      ? await fetch(endpoint, { headers: { Accept: "application/json" }, cache: "no-store" })
+      : await fetch(endpoint, { method: "POST", headers: { "Content-Type": "application/json", Accept: "application/json" }, cache: "no-store", body: JSON.stringify(options) });
+    const estimate = await apiJson(response);
+    if (!isCurrentOperation(state.operation, id)) return;
+    renderEstimate(estimate);
+  } catch (error) {
+    if (error.reauthenticate) showSessionExpired();
+    else showError("The estimate could not be prepared.", error.message || "Check the options and try again.");
+  }
+}
+
+function renderEstimate(estimate) {
+  $("#progress-view").hidden = true;
+  $("#workspace").hidden = false;
+  $("#convert-button").hidden = true;
+  $("#estimate-review").hidden = false;
+  const size = estimate.size_min_bytes == null ? "Size unavailable" : `${formatBytes(estimate.size_min_bytes)}–${formatBytes(estimate.size_max_bytes)}`;
+  const eta = estimate.eta_min_seconds == null ? "time unavailable" : `${formatDuration(estimate.eta_min_seconds)}–${formatDuration(estimate.eta_max_seconds)}`;
+  const sourceBytes = Number(estimate.source?.bytes);
+  const reduction = Number.isFinite(sourceBytes) && sourceBytes > 0 && estimate.size_min_bytes != null && estimate.size_max_bytes != null
+    ? `Expected size change ${formatSignedPercent((sourceBytes - estimate.size_max_bytes) / sourceBytes * 100)} to ${formatSignedPercent((sourceBytes - estimate.size_min_bytes) / sourceBytes * 100)}`
+    : "Size change unavailable";
+  const detail = [size, reduction, eta, estimate.method, estimate.confidence ? `${estimate.confidence} confidence` : ""].filter(Boolean).join(" · ");
+  $("#estimate-summary").textContent = `${detail}. Starting is a separate action.`;
+  $("#estimate-review").dataset.optionsKey = estimate.options_key || "";
+  $("#start-job-button").disabled = !navigator.onLine;
+  setProcessingControlsDisabled(true);
+  announce("Estimate ready. Review it before starting processing.");
+}
+
+function setProcessingControlsDisabled(disabled) {
+  document.querySelectorAll("#conversion-form input, #conversion-form select").forEach((element) => { element.disabled = disabled; });
+  $("#workflow-select").disabled = disabled;
+  $("#compression-target-bytes").disabled = disabled;
+  $("#compression-resolution").disabled = disabled;
+  $("#compression-audio").disabled = disabled;
+  $("#compression-quality").disabled = disabled;
+}
+
+async function discardPreparedJob() {
+  if (!state.jobId || !state.statusUrl || !navigator.onLine) return;
+  const button = $("#discard-prepared-button"); button.disabled = true;
+  try {
+    const response = await fetch(state.statusUrl, { method: "DELETE", cache: "no-store" });
+    if (!response.ok && response.status !== 404 && response.status !== 410) await apiJson(response);
+    const parentDownload = state.downloadId;
+    await reset(false);
+    if (parentDownload) {
+      setMode("download"); state.downloadId = parentDownload;
+      $("#download-review").hidden = false; await pollDownload();
+    }
+  } catch (error) { announce(error.message || "The prepared job could not be discarded."); }
+  finally { button.disabled = false; }
+}
+
+async function refineEstimate() {
+  if (!state.statusUrl || !navigator.onLine) return;
+  const button = $("#refine-estimate"); button.disabled = true; button.textContent = "Refining…";
+  try { await requestEstimate({ id: state.jobId }, true); }
+  finally { button.disabled = false; button.textContent = "Refine estimate"; }
+}
+
+async function startPreparedJob() {
+  if (!state.jobId || !state.statusUrl || !navigator.onLine) return;
+  const button = $("#start-job-button"); button.disabled = true;
+  try {
+    const response = await fetch(`${jobApiUrl(state.jobId)}/start`, { method: "POST", headers: { "Content-Type": "application/json", Accept: "application/json" }, cache: "no-store", body: JSON.stringify(state.processingOptions || buildProcessingOptions()) });
+    const job = await apiJson(response);
+    state.jobId = job.id;
+    state.statusUrl = validateStatusUrl(job.status_url, ["jobs", "compressions"], job.id);
+    rememberJob(job.id);
+    $("#workspace").hidden = true; $("#estimate-review").hidden = true;
+    showView("#progress-view"); $("#progress-view").classList.add("is-processing"); renderJobProgress(job); pollJob();
+  } catch (error) {
+    button.disabled = false;
+    if (error.reauthenticate) showSessionExpired(); else showApiFailure(error.body, error.status);
+  }
+}
+
+function validateStatusUrl(value, routes, id) {
+  const allowed = Array.isArray(routes) ? routes : [routes];
+  if (typeof value !== "string" || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(id || "")) throw new Error("The server returned an invalid job identity.");
+  const url = new URL(value, window.location.origin);
+  if (url.origin !== window.location.origin || url.search || url.hash || url.username || url.password) throw new Error("The server returned an unsafe status URL.");
+  const route = allowed.find((item) => url.pathname === `/v1/${item}/${id}`);
+  if (!route) throw new Error("The server returned an unexpected status URL.");
+  return url.pathname;
+}
+
+function jobApiUrl(id) {
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(id || "")) throw new Error("The server returned an invalid job identity.");
+  return `/v1/jobs/${id}`;
+}
+
+async function startDownload(event) {
+  event.preventDefault();
+  if (!navigator.onLine || !state.capabilities?.downloads_enabled) return showError("Downloads are unavailable.", "Reconnect or check the server’s download capability.");
+  state.downloadState = null;
+  const workflow = $("#download-workflow").value;
+  const processingOptions = buildProcessingOptions(workflow, { target: "#download-target", quality: "#download-quality-percent", resolution: "#download-resolution", audio: "#download-audio", targetBytes: "#download-target-bytes" });
+  const body = {
+    url: $("#media-url").value.trim(), quality: $("#download-quality").value,
+    format: $("#download-format").value, download_type: $("#download-type").value,
+    codec: $("#download-codec").value, workflow: $("#download-workflow").value,
+    auto_process: $("#download-auto-process").checked,
+    ...processingOptions,
+  };
+  $("#download-submit").disabled = true;
+  try {
+    const download = await apiJson(await fetch("/v1/downloads", { method: "POST", headers: { "Content-Type": "application/json", Accept: "application/json" }, cache: "no-store", body: JSON.stringify(body) }));
+    state.downloadId = download.id;
+    state.downloadStatusUrl = validateStatusUrl(download.status_url, "downloads", download.id);
+    $("#download-review").hidden = false;
+    await pollDownload();
+  } catch (error) {
+    if (error.reauthenticate) showSessionExpired(); else showApiFailure(error.body, error.status);
+  } finally { $("#download-submit").disabled = false; }
+}
+
+async function pollDownload() {
+  if (!state.downloadStatusUrl || !navigator.onLine) return;
+  try {
+    const item = await apiJson(await fetch(state.downloadStatusUrl, { headers: { Accept: "application/json" }, cache: "no-store" }));
+    const originalAfterProcessingFailure = ["failed", "awaiting_review"].includes(item.state) && item.error?.code === "PROCESSING_FAILED" && item.output?.download_url;
+    state.downloadState = originalAfterProcessingFailure ? "awaiting_review" : item.state;
+    if (["queued", "downloading", "processing"].includes(item.state)) {
+      $("#download-review-detail").textContent = item.submission_unknown
+        ? "Confirming whether the source accepted this download request…"
+        : item.progress?.eta_seconds ? `Downloading · about ${formatDuration(item.progress.eta_seconds)} remaining.` : "Downloading from the source…";
+      updateDownloadWorkflow();
+      state.downloadTimer = window.setTimeout(pollDownload, item.submission_unknown ? 2000 : 1000); return;
+    }
+    if (item.state === "failed" && !originalAfterProcessingFailure) throw new Error(item.error?.message || "The source could not be downloaded.");
+    $("#download-review-detail").textContent = originalAfterProcessingFailure
+      ? `Original download preserved · ${item.output.filename}${item.output.bytes ? ` · ${formatBytes(item.output.bytes)}` : ""}. Processing did not complete: ${item.error?.message || "try again or download the original"}.`
+      : item.state === "awaiting_review" ? `Ready to review · ${item.output?.filename || item.source_filename || "media file"}${item.output?.bytes ? ` · ${formatBytes(item.output.bytes)}` : ""}` : `Download ready · ${item.output?.filename || "media file"}`;
+    $("#download-source-button").href = `${state.downloadStatusUrl}/content`;
+    $("#download-source-button").setAttribute("download", item.output?.filename || item.source_filename || "media-file");
+    updateDownloadWorkflow();
+    $("#download-discard-button").hidden = false;
+    if (!$("#history-panel").hidden) loadHistory();
+  } catch (error) {
+    $("#download-review-detail").textContent = error.message || "Download status is unavailable.";
+  }
+}
+
+async function processDownloadedFile() {
+  if (!state.downloadStatusUrl || !navigator.onLine) return;
+  try {
+    state.processingOptions = buildProcessingOptions($("#download-workflow").value, { target: "#download-target", quality: "#download-quality-percent", resolution: "#download-resolution", audio: "#download-audio", targetBytes: "#download-target-bytes" });
+    setMode($("#download-workflow").value === "compress" ? "compress" : "convert");
+    const prepared = await apiJson(await fetch(`${state.downloadStatusUrl}/process`, { method: "POST", headers: { "Content-Type": "application/json", Accept: "application/json" }, cache: "no-store", body: JSON.stringify({ ...state.processingOptions, auto_start: false }) }));
+    state.jobId = prepared.id;
+    state.statusUrl = validateStatusUrl(prepared.status_url, ["jobs", "compressions"], prepared.id);
+    rememberJob(prepared.id);
+    await requestEstimate(prepared, false);
+    $("#download-review").hidden = true;
+    $("#workspace").hidden = false;
+    showView("#workspace");
+  } catch (error) { if (error.reauthenticate) showSessionExpired(); else $("#download-review-detail").textContent = error.message; }
+}
+
+async function discardDownloadedFile() {
+  if (!state.downloadStatusUrl || !navigator.onLine || !window.confirm("Discard this downloaded file?")) return;
+  try {
+    await fetch(state.downloadStatusUrl, { method: "DELETE", cache: "no-store" });
+    state.downloadId = null; state.downloadStatusUrl = null; state.downloadState = null; $("#download-review").hidden = true; $("#download-review-detail").textContent = "";
+    if (!$("#history-panel").hidden) loadHistory();
+  } catch (_) { announce("The download could not be discarded. Try again."); }
 }
 
 async function continueUpload() {
@@ -382,25 +675,24 @@ async function continueUpload() {
 
     let job;
     try {
-      const completedResponse = await fetch(`/v1/uploads/${encodeURIComponent(jobId)}/complete`, {
+    const completedResponse = await fetch(`/v1/uploads/${encodeURIComponent(jobId)}/prepare`, {
         method: "POST",
         headers: { Accept: "application/json" },
       });
       job = await apiJson(completedResponse);
     } catch (error) {
-      if (!isCurrentOperation(operation, jobId) || (error.status && error.body?.error?.code !== "UPLOAD_ALREADY_COMPLETED")) throw error;
-      // A previous completion may have succeeded before its reply was lost.
+      if (!isCurrentOperation(operation, jobId)) throw error;
+      // A previous prepare may have succeeded before its reply was lost.
       const response = await fetch(`/v1/jobs/${encodeURIComponent(jobId)}`, { headers: { Accept: "application/json" }, cache: "no-store" });
       job = await apiJson(response);
       if (job.state === "uploading") throw error;
     }
     if (!isCurrentOperation(operation, jobId)) return;
     state.upload = null;
-    $("#progress-view").classList.add("is-processing");
-    renderStage("inspecting", null);
     state.jobId = job.id;
+    state.statusUrl = validateStatusUrl(job.status_url, "jobs", job.id);
     rememberJob(job.id);
-    pollJob();
+    await requestEstimate(job, false);
   } catch (error) {
     if (isCurrentOperation(operation, jobId)) handleUploadError(error);
   }
@@ -475,7 +767,8 @@ async function pollJob() {
   const jobId = state.jobId;
   if (!isCurrentOperation(operation, jobId) || !jobId) return;
   try {
-    const response = await fetch(`/v1/jobs/${encodeURIComponent(jobId)}`, { headers: { Accept: "application/json" }, cache: "no-store" });
+    const statusUrl = state.statusUrl || `/v1/jobs/${encodeURIComponent(jobId)}`;
+    const response = await fetch(statusUrl, { headers: { Accept: "application/json" }, cache: "no-store" });
     const job = await apiJson(response);
     if (!isCurrentOperation(operation, jobId)) return;
     if (job.state === "ready") return showResult(job);
@@ -548,14 +841,14 @@ function showResult(job) {
   state.result = job.output;
   state.sharing = false;
   rememberJob(job.id);
-  const input = job.input; const output = job.output; const target = targetFor(job.target);
+  const input = job.input; const output = job.output; const target = targetFor(job.target) || { extension: getExtension(output.filename) || "file" };
   $("#result-input-size").textContent = formatBytes(input.bytes);
   $("#result-output-size").textContent = formatBytes(output.bytes);
   $("#result-input-meta").textContent = mediaMeta(input);
   $("#result-output-meta").textContent = mediaMeta(output);
   const difference = input.bytes - output.bytes;
   $("#size-difference").textContent = difference >= 0 ? `${formatBytes(difference)} smaller than the source.` : `${formatBytes(Math.abs(difference))} larger than the source.`;
-  $("#download-button").href = `/v1/jobs/${encodeURIComponent(job.id)}/content`;
+  $("#download-button").href = `${state.statusUrl || `/v1/jobs/${encodeURIComponent(job.id)}`}/content`;
   $("#download-button").setAttribute("download", output.filename);
   $("#download-button").firstChild.textContent = "Open ";
   $("#download-extension").textContent = `.${target.extension}`;
@@ -581,7 +874,7 @@ async function shareResult() {
   button.disabled = true;
   button.firstChild.textContent = "Preparing… ";
   try {
-    const response = await fetch(`/v1/jobs/${encodeURIComponent(jobId)}/content`);
+    const response = await fetch(`${state.statusUrl || `/v1/jobs/${encodeURIComponent(jobId)}`}/content`);
     if (!response.ok) throw new Error("The result could not be opened.");
     const blob = await response.blob();
     if (!isCurrentOperation(operation, jobId) || state.result !== result) return;
@@ -613,7 +906,7 @@ async function discardResult() {
   const button = $("#discard-button");
   button.disabled = true;
   try {
-    const response = await fetch(`/v1/jobs/${encodeURIComponent(jobId)}`, { method: "DELETE", cache: "no-store" });
+    const response = await fetch(state.statusUrl || `/v1/jobs/${encodeURIComponent(jobId)}`, { method: "DELETE", cache: "no-store" });
     if (!response.ok && response.status !== 404 && response.status !== 410) await apiJson(response);
     if (!isCurrentOperation(operation, jobId)) return;
     await reset(false);
@@ -626,19 +919,24 @@ async function discardResult() {
 
 async function reset(deleteJob = !state.result) {
   const oldJobId = state.jobId;
+  const oldStatusUrl = state.statusUrl;
   ++state.operation;
   state.cancelled = true;
   if (state.xhr) state.xhr.abort();
   clearTimers();
-  state.jobId = null; state.result = null; state.sharing = false; state.file = null; state.mediaClass = null; state.upload = null; state.resumeAction = null; state.reloadOnError = false;
+  state.jobId = null; state.statusUrl = null; state.processingOptions = null; state.result = null; state.sharing = false; state.file = null; state.mediaClass = null; state.upload = null; state.resumeAction = null; state.reloadOnError = false;
   clearRecovery();
+  $("#estimate-review").hidden = true;
+  $("#convert-button").hidden = false;
+  setProcessingControlsDisabled(false);
   revokePreview();
   $("#file-input").value = "";
   state.requestedTarget = null;
   showView("#drop-zone");
   finishDeferredUpdate();
   announce("Ready for another file.");
-  if (deleteJob && oldJobId) { try { await fetch(`/v1/jobs/${encodeURIComponent(oldJobId)}`, { method: "DELETE" }); } catch (_) { /* Best-effort cleanup. */ } }
+  const cancelUrl = oldStatusUrl || (oldJobId && /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(oldJobId) ? `/v1/jobs/${oldJobId}` : null);
+  if (deleteJob && cancelUrl) { try { await fetch(cancelUrl, { method: "DELETE" }); } catch (_) { /* Best-effort cleanup after explicit cancellation. */ } }
 }
 
 function showApiFailure(body, status) {
@@ -680,6 +978,8 @@ function targetFor(value) { return state.capabilities.targets.find((target) => t
 function getExtension(name) { const match = String(name).toLowerCase().match(/\.([a-z0-9]+)$/); return match ? match[1] : ""; }
 function classLabel(value) { return ({ image: "Still image", animation: "Animation", video: "Video", audio: "Audio" })[value]; }
 function formatBytes(bytes) { if (bytes < 1024) return `${bytes} B`; const units = ["KB", "MB", "GB"]; let value = bytes; let unit = "B"; for (const next of units) { value /= 1024; unit = next; if (value < 1024) break; } return `${value >= 10 ? value.toFixed(1) : value.toFixed(2)} ${unit}`; }
+
+function formatSignedPercent(value) { return `${Math.abs(value).toFixed(0)}% ${value > 0 ? "smaller" : value < 0 ? "larger" : "same size"}`; }
 function formatClock(seconds) { const rounded = Math.round(seconds); const minutes = Math.floor(rounded / 60); return `${minutes}:${String(rounded % 60).padStart(2, "0")}`; }
 function formatDuration(seconds) {
   if (seconds >= 86400) { const days = Math.round(seconds / 86400); return `${days} ${days === 1 ? "day" : "days"}`; }
@@ -692,8 +992,9 @@ function revokePreview() { if (state.objectUrl) URL.revokeObjectURL(state.object
 function clearTimers() { window.clearTimeout(state.pollTimer); window.clearInterval(state.expiryTimer); state.pollTimer = null; state.expiryTimer = null; }
 function isCurrentOperation(operation, jobId = state.jobId) { return operation === state.operation && !state.cancelled && jobId === state.jobId; }
 function readRecovery() { try { return sessionStorage.getItem(RECOVERY_KEY); } catch (_) { return null; } }
-function rememberJob(jobId) { try { sessionStorage.setItem(RECOVERY_KEY, jobId); } catch (_) { /* Recovery is optional when browser storage is unavailable. */ } }
-function clearRecovery() { try { sessionStorage.removeItem(RECOVERY_KEY); } catch (_) { /* Browser storage may be unavailable. */ } }
+function rememberJob(jobId) { try { sessionStorage.setItem(RECOVERY_KEY, jobId); if (state.statusUrl) sessionStorage.setItem(RECOVERY_URL_KEY, state.statusUrl); } catch (_) { /* Recovery is optional when browser storage is unavailable. */ } }
+function readRecoveryUrl() { try { return sessionStorage.getItem(RECOVERY_URL_KEY); } catch (_) { return null; } }
+function clearRecovery() { try { sessionStorage.removeItem(RECOVERY_KEY); sessionStorage.removeItem(RECOVERY_URL_KEY); } catch (_) { /* Browser storage may be unavailable. */ } }
 function updateResultActions() {
   const available = navigator.onLine && Boolean(state.result);
   const download = $("#download-button");
@@ -731,6 +1032,7 @@ function updateExpiry(value) {
 }
 
 function formatHistoryDate(value) {
+  if (!value) return "In progress";
   return new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" }).format(new Date(value));
 }
 
@@ -782,25 +1084,73 @@ async function loadHistory(append = false) {
 function renderHistory() {
   const list = $("#history-list");
   list.replaceChildren();
+  const byId = new Map(historyState.items.map((entry) => [entry.id, entry]));
+  const groupedChildren = new Set();
   historyState.items.forEach((entry) => {
-    const job = entry.job;
+    const job = entry.job || entry;
+    if (entry.kind !== "download") return;
+    const childId = entry.child_id || job.child_id;
+    const child = childId && byId.get(childId);
+    if (child && (child.parent_id || child.job?.parent_id || (child.job || child).parent_id) === entry.id) groupedChildren.add(childId);
+  });
+  historyState.items.forEach((entry) => {
+    if (groupedChildren.has(entry.id)) return;
+    const job = entry.job || entry;
     const row = document.createElement("li"); row.className = "history-row";
     const detail = document.createElement("div"); detail.className = "history-detail";
     const name = document.createElement("strong"); name.textContent = job.output?.filename || entry.source_filename || "Unnamed media";
     const metadata = document.createElement("p");
-    metadata.textContent = `${entry.kind === "compression" ? "Compressed" : "Converted"} · ${formatHistoryDate(entry.completed_at)}${job.output ? ` · ${formatBytes(job.output.bytes)}` : ""}`;
+    const label = entry.kind === "download" ? "Downloaded" : entry.kind === "compression" ? "Compressed" : "Converted";
+    const submissionUnknown = entry.kind === "download" && job.submission_unknown === true;
+    const eta = submissionUnknown ? null : entry.processing?.eta_seconds ?? job.processing?.eta_seconds;
+    const origin = entry.origin || job.origin;
+    const linkedChildId = entry.child_id || job.child_id;
+    const childEntry = entry.kind === "download" && linkedChildId && groupedChildren.has(linkedChildId) ? byId.get(linkedChildId) : null;
+    const lineage = entry.parent_id || job.parent_id ? " · Processed result" : linkedChildId ? " · Original download" : "";
+    metadata.textContent = `${submissionUnknown ? "Confirming source acceptance" : label} · ${formatHistoryDate(entry.completed_at)}${job.output?.bytes ? ` · ${formatBytes(job.output.bytes)}` : ""}${eta ? ` · about ${formatDuration(eta)} left` : ""}${origin ? ` · ${origin}` : ""}${lineage}`;
     const expiry = document.createElement("p"); expiry.className = job.state === "failed" ? "history-failure" : "history-expiry";
-    expiry.textContent = job.state === "failed" ? `Failed · ${job.error?.message || "The media could not be processed."}` : `Expires ${formatHistoryDate(job.expires_at)}`;
+    expiry.textContent = job.state === "failed" ? `Failed · ${job.error?.message || "The media could not be processed."}` : job.expires_at ? `Expires ${formatHistoryDate(job.expires_at)}` : job.state;
     detail.append(name, metadata, expiry);
+    if (childEntry) {
+      const childJob = childEntry.job || childEntry;
+      const stages = document.createElement("div"); stages.className = "history-lineage-stages";
+      const originalStage = document.createElement("p"); originalStage.textContent = `Original · ${job.output?.filename || entry.source_filename || "download"}`;
+      const processedStage = document.createElement("p"); processedStage.textContent = `Processed · ${childJob.output?.filename || childEntry.source_filename || "processing job"} · ${childJob.state || "status unavailable"}`;
+      stages.append(originalStage, processedStage); detail.append(stages);
+    } else if (linkedChildId && entry.kind === "download") {
+      const linked = document.createElement("p"); linked.className = "history-lineage-status";
+      linked.textContent = `Processed result linked · ${linkedChildId} · shown when its history page is loaded.`; detail.append(linked);
+    }
     const actions = document.createElement("div"); actions.className = "history-actions";
-    const base = `/v1/${entry.kind === "compression" ? "compressions" : "jobs"}/${encodeURIComponent(entry.id)}`;
-    if (job.state === "ready" && job.output) {
+    const route = entry.kind === "download" ? "downloads" : entry.kind === "compression" ? "compressions" : "jobs";
+    let base = `/v1/${route}/${encodeURIComponent(entry.id)}`;
+    try { if (job.status_url) base = validateStatusUrl(job.status_url, route, entry.id); } catch (_) { /* Ignore an untrusted history URL. */ }
+    if ((job.state === "ready" || (entry.kind === "download" && ["awaiting_review", "processing"].includes(job.state))) && job.output) {
       const download = document.createElement("a"); download.className = "secondary-action history-download";
-      download.href = `${base}/content`; download.setAttribute("download", job.output.filename); download.textContent = "Download";
+      download.href = `${base}/content`; download.setAttribute("download", job.output.filename); download.textContent = entry.kind === "download" ? "Download source" : "Download";
       download.setAttribute("aria-label", `Download ${job.output.filename}`);
       download.dataset.expires = job.expires_at;
       download.addEventListener("click", (event) => { if (!navigator.onLine || new Date(job.expires_at).getTime() <= Date.now()) { event.preventDefault(); announce("Reconnect or refresh history before downloading."); } });
       actions.append(download);
+    }
+    if (childEntry) {
+      const childJob = childEntry.job || childEntry;
+      let childBase = `/v1/${childEntry.kind === "compression" ? "compressions" : "jobs"}/${encodeURIComponent(childEntry.id)}`;
+      try { if (childJob.status_url) childBase = validateStatusUrl(childJob.status_url, childEntry.kind === "compression" ? "compressions" : "jobs", childEntry.id); } catch (_) { /* Ignore an untrusted history URL. */ }
+      if (childJob.state === "ready" && childJob.output) {
+        const download = document.createElement("a"); download.className = "secondary-action history-download";
+        download.href = `${childBase}/content`; download.setAttribute("download", childJob.output.filename); download.textContent = "Download processed";
+        download.setAttribute("aria-label", `Download processed ${childJob.output.filename}`); download.dataset.expires = childJob.expires_at;
+        download.addEventListener("click", (event) => { if (!navigator.onLine || new Date(childJob.expires_at).getTime() <= Date.now()) { event.preventDefault(); announce("Reconnect or refresh history before downloading."); } });
+        actions.append(download);
+      }
+      const childRemove = document.createElement("button"); childRemove.type = "button"; childRemove.className = "text-action history-delete"; childRemove.textContent = "Delete processed";
+      childRemove.dataset.jobId = childEntry.id; childRemove.setAttribute("aria-label", `Delete processed ${childJob.output?.filename || "result"}`);
+      childRemove.addEventListener("click", () => deleteHistoryEntry(childEntry, childRemove)); actions.append(childRemove);
+    }
+    if (["queued", "downloading", "awaiting_review", "processing"].includes(job.state)) {
+      const review = document.createElement("button"); review.type = "button"; review.className = "secondary-action history-review"; review.textContent = job.state === "awaiting_review" ? "Review estimate" : submissionUnknown ? "View status" : "View progress";
+      review.addEventListener("click", () => resumeHistoryEntry(entry, base)); actions.append(review);
     }
     const remove = document.createElement("button"); remove.type = "button"; remove.className = "text-action history-delete"; remove.textContent = "Delete";
     remove.dataset.jobId = entry.id;
@@ -846,7 +1196,7 @@ async function deleteHistoryEntry(entry, button) {
   if (!navigator.onLine || historyState.deleting.has(entry.id) || !window.confirm(`Delete ${entry.job.output?.filename || entry.source_filename || "this result"} from history? This removes the saved result.`)) return;
   historyState.deleting.add(entry.id);
   button.disabled = true;
-  const base = `/v1/${entry.kind === "compression" ? "compressions" : "jobs"}/${encodeURIComponent(entry.id)}`;
+  const base = entry.kind === "download" ? `/v1/downloads/${encodeURIComponent(entry.id)}` : `/v1/${entry.kind === "compression" ? "compressions" : "jobs"}/${encodeURIComponent(entry.id)}`;
   try {
     const response = await fetch(base, { method: "DELETE", cache: "no-store" });
     if (!response.ok && response.status !== 404 && response.status !== 410) await apiJson(response);
@@ -856,4 +1206,17 @@ async function deleteHistoryEntry(entry, button) {
     $("#history-message").textContent = error.reauthenticate ? "Sign in again to delete results." : "The result could not be deleted. Try again.";
     if (error.reauthenticate) showSessionExpired();
   } finally { historyState.deleting.delete(entry.id); updateHistoryActions(); }
+}
+
+async function resumeHistoryEntry(entry, statusUrl) {
+  const job = entry.job || entry;
+  try {
+    const route = validateStatusUrl(statusUrl, entry.kind === "download" ? "downloads" : ["jobs", "compressions"], entry.id);
+    if (entry.kind === "download") {
+      setMode("download"); state.downloadId = entry.id; state.downloadStatusUrl = route; $("#download-review").hidden = false; await pollDownload(); return;
+    }
+    state.jobId = entry.id; state.statusUrl = route; state.processingOptions = job.conversion_options || { conversion_options: null, compression_options: null };
+    if (job.state === "awaiting_review") { await requestEstimate(job, true); showView("#workspace"); }
+    else { showView("#progress-view"); renderJobProgress(job); state.cancelled = false; pollJob(); }
+  } catch (error) { announce(error.message || "This item cannot be reopened safely."); }
 }

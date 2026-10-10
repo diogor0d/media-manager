@@ -41,6 +41,7 @@ class AudioMode(StrEnum):
 
 class JobState(StrEnum):
     UPLOADING = "uploading"
+    AWAITING_REVIEW = "awaiting_review"
     QUEUED = "queued"
     PROCESSING = "processing"
     READY = "ready"
@@ -69,6 +70,16 @@ class ConversionOptions(BaseModel):
     quality_percent: int | None = Field(default=None, ge=0, le=100)
     resolution: Resolution = Resolution.SOURCE
     audio: AudioMode = AudioMode.KEEP
+
+
+class CompressionOptions(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    target_bytes: int = Field(default=20_000_000, ge=1)
+    target: Target | None = None
+    resolution: Resolution = Resolution.SOURCE
+    audio: AudioMode = AudioMode.KEEP
+    quality_percent: int = Field(default=50, ge=0, le=100)
 
 
 class MediaMetadata(BaseModel):
@@ -100,6 +111,7 @@ class JobError(BaseModel):
 class JobProgress(BaseModel):
     stage: JobProgressStage
     percent: int | None = Field(default=None, ge=0, le=100)
+    eta_seconds: int | None = Field(default=None, ge=0)
 
 
 class JobView(BaseModel):
@@ -117,6 +129,8 @@ class JobView(BaseModel):
     output: OutputMetadata | None = None
     error: JobError | None = None
     progress: JobProgress | None = None
+    origin: str = "api"
+    parent_id: str | None = None
 
 
 class CompressionMetadata(BaseModel):
@@ -138,6 +152,9 @@ class CompressionJobView(BaseModel):
     error: JobError | None = None
     progress: JobProgress | None = None
     compression: CompressionMetadata | None = None
+    options: CompressionOptions | None = None
+    origin: str = "api"
+    parent_id: str | None = None
 
 
 class ErrorBody(BaseModel):
@@ -192,6 +209,7 @@ class Capabilities(BaseModel):
     max_chunk_bytes: int
     result_ttl_seconds: int
     compression_target_bytes: int
+    downloads_enabled: bool = False
 
 
 class UploadView(BaseModel):
@@ -211,5 +229,25 @@ class HistoryEntry(BaseModel):
     id: str
     kind: Literal["conversion", "compression"]
     source_filename: str | None = None
-    completed_at: datetime
+    completed_at: datetime | None = None
     job: JobView | CompressionJobView
+
+
+class ProcessingRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    conversion_options: ConversionOptions | None = None
+    compression_options: CompressionOptions | None = None
+    auto_start: bool = False
+
+
+class EstimateView(BaseModel):
+    method: Literal["fast", "sampled"]
+    size_min_bytes: int = Field(ge=0)
+    size_max_bytes: int = Field(ge=0)
+    eta_min_seconds: float | None = Field(default=None, ge=0)
+    eta_max_seconds: float | None = Field(default=None, ge=0)
+    confidence: Literal["low", "medium"]
+    status: Literal["pending", "ready", "fallback"]
+    source: MediaMetadata
+    options_key: str

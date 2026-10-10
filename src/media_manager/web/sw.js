@@ -1,10 +1,10 @@
 "use strict";
 
-const CACHE_NAME = "media-manager-shell-history1";
+const CACHE_NAME = "media-manager-shell-workflows2";
 const SHELL = new Map([
   ["/", "text/html"],
-  ["/assets/app.css?v=history1", "text/css"],
-  ["/assets/app.js?v=history1", "text/javascript"],
+  ["/assets/app.css?v=workflows2", "text/css"],
+  ["/assets/app.js?v=workflows2", "text/javascript"],
   ["/assets/logo.svg", "image/svg+xml"],
   ["/favicon.svg", "image/svg+xml"],
   ["/manifest.webmanifest", "application/manifest+json"],

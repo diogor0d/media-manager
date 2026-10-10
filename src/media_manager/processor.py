@@ -17,6 +17,7 @@ from media_manager.errors import ProcessingError
 from media_manager.models import (
     AudioMode,
     CompressionMetadata,
+    CompressionOptions,
     ConversionOptions,
     JobProgressStage,
     MediaClass,
@@ -466,15 +467,56 @@ class MediaProcessor:
             duration_ms=output_probe.media.duration_ms,
         )
 
+    async def inspect(
+        self,
+        path: Path,
+        cancel_event: asyncio.Event | None = None,
+    ) -> MediaMetadata:
+        """Probe an uploaded file and apply the same limits used before conversion."""
+        try:
+            size_bytes = path.stat().st_size
+        except OSError as exc:
+            raise ProcessingError("UNSUPPORTED_MEDIA", "Media file is unavailable") from exc
+        if size_bytes <= 0:
+            raise ProcessingError("UNSUPPORTED_MEDIA", "Media file is empty")
+        if size_bytes > self._settings.max_upload_bytes:
+            raise ProcessingError("MEDIA_LIMIT_EXCEEDED", "Media exceeds the upload limit")
+
+        probe = await self._probe(path, cancel_event=cancel_event)
+        target = {
+            MediaClass.VIDEO: Target.VIDEO_MP4,
+            MediaClass.ANIMATION: Target.VIDEO_MP4,
+            MediaClass.IMAGE: Target.IMAGE_WEBP,
+            MediaClass.AUDIO: Target.AUDIO_M4A,
+        }[probe.media.media_class]
+        self._validate_input(probe, ConversionOptions(target=target))
+        if (
+            probe.media.media_class is MediaClass.ANIMATION
+            and probe.video
+            and probe.video.width
+            and probe.video.height
+            and probe.video.width * probe.video.height > self._settings.max_animation_pixels
+        ):
+            raise ProcessingError(
+                "MEDIA_LIMIT_EXCEEDED", "Animation pixel count exceeds the limit"
+            )
+        return probe.media
+
     async def compress(
         self,
         input_path: Path,
         job_dir: Path,
         cancel_event: asyncio.Event,
         progress_callback: ProgressCallback | None = None,
+        *,
+        options: CompressionOptions | None = None,
     ) -> CompressionResult:
         try:
             async with asyncio.timeout(COMPRESSION_TIMEOUT_SECONDS):
+                if options is not None:
+                    return await self._compress_advanced(
+                        input_path, job_dir, cancel_event, options, progress_callback
+                    )
                 return await self._compress(
                     input_path,
                     job_dir,
@@ -486,6 +528,157 @@ class MediaProcessor:
                 "PROCESSING_TIMEOUT",
                 "Compression exceeded its time limit",
             ) from exc
+
+    async def _compress_advanced(
+        self,
+        input_path: Path,
+        job_dir: Path,
+        cancel_event: asyncio.Event,
+        options: CompressionOptions,
+        progress_callback: ProgressCallback | None = None,
+    ) -> CompressionResult:
+        if progress_callback:
+            await progress_callback(JobProgressStage.INSPECTING, None)
+        source = await self._probe(input_path, cancel_event=cancel_event)
+        default_target = {
+            MediaClass.VIDEO: Target.VIDEO_MP4,
+            MediaClass.ANIMATION: Target.VIDEO_MP4,
+            MediaClass.IMAGE: Target.IMAGE_WEBP,
+            MediaClass.AUDIO: Target.AUDIO_M4A,
+        }[source.media.media_class]
+        target = options.target or default_target
+        base_options = ConversionOptions(
+            target=target,
+            quality_percent=options.quality_percent,
+            resolution=options.resolution,
+            audio=options.audio,
+        )
+        self._validate_input(source, base_options)
+
+        candidates = self._advanced_compression_attempts(source, options, target)
+        retained: tuple[int, ConversionResult, Path] | None = None
+        attempt_count = 0
+        aim_bytes = max(1, round(options.target_bytes * 0.95))
+        for index, candidate_options in enumerate(candidates):
+            attempt_count = index + 1
+            if cancel_event.is_set():
+                raise ConversionCancelled
+            attempt_dir = job_dir / f"compression-{index + 1}"
+            attempt_dir.mkdir(mode=0o700)
+
+            async def report(
+                stage: JobProgressStage,
+                percent: int | None,
+                attempt_index: int = index,
+            ) -> None:
+                if not progress_callback or stage is not JobProgressStage.CONVERTING:
+                    return
+                completed = attempt_index / len(candidates)
+                current = (percent or 0) / 100 / len(candidates)
+                await progress_callback(
+                    JobProgressStage.CONVERTING,
+                    min(99, round((completed + current) * 100)),
+                )
+
+            try:
+                result = await self.convert(
+                    input_path, attempt_dir, candidate_options, cancel_event, report
+                )
+            except ProcessingError:
+                await asyncio.to_thread(shutil.rmtree, attempt_dir, True)
+                continue
+
+            candidate = (result.output_bytes, result, attempt_dir)
+            if retained is None or candidate[0] < retained[0]:
+                if retained:
+                    await asyncio.to_thread(shutil.rmtree, retained[2], True)
+                retained = candidate
+            else:
+                await asyncio.to_thread(shutil.rmtree, attempt_dir, True)
+            if result.output_bytes <= aim_bytes:
+                # The current attempt has reached the useful target. More
+                # aggressive settings would only reduce fidelity.
+                break
+
+        if retained is None:
+            raise ProcessingError("COMPRESSION_FAILED", "The media could not be compressed")
+
+        output_bytes, result, attempt_dir = retained
+        final_path = job_dir / f"compressed.{TARGET_SPECS[target].extension}"
+        result.output_path.replace(final_path)
+        await asyncio.to_thread(shutil.rmtree, attempt_dir, True)
+        if progress_callback:
+            await progress_callback(JobProgressStage.VALIDATING, 100)
+        return CompressionResult(
+            input=source.media,
+            output_path=final_path,
+            output_bytes=output_bytes,
+            filename=f"compressed.{TARGET_SPECS[target].extension}",
+            media_type=result.media_type,
+            width=result.width,
+            height=result.height,
+            duration_ms=result.duration_ms,
+            compression=CompressionMetadata(
+                target_bytes=options.target_bytes,
+                aim_bytes=aim_bytes,
+                met_target=output_bytes <= options.target_bytes,
+                attempts=attempt_count,
+                selected_target=target,
+            ),
+        )
+
+    @staticmethod
+    def _advanced_compression_attempts(
+        source: ProbeInfo,
+        options: CompressionOptions,
+        target: Target,
+    ) -> tuple[ConversionOptions, ...]:
+        quality_steps = tuple(dict.fromkeys((options.quality_percent, 25, 0)))
+        resolutions = [options.resolution]
+        # Each resolution is a cap. Appending only smaller caps means every
+        # candidate remains at or below the user's selected maximum.
+        resolution_order = [
+            Resolution.P2160,
+            Resolution.P1440,
+            Resolution.P1080,
+            Resolution.P720,
+            Resolution.P480,
+        ]
+        source_edge = max(source.media.width or 0, source.media.height or 0)
+        if options.resolution is Resolution.SOURCE:
+            current_edge = source_edge
+            for resolution in resolution_order:
+                edge = RESOLUTION_MAX_EDGE[resolution]
+                if edge < current_edge:
+                    resolutions.append(resolution)
+                    current_edge = edge
+        else:
+            selected_index = resolution_order.index(options.resolution)
+            current_edge = min(
+                source_edge, RESOLUTION_MAX_EDGE[options.resolution]
+            )
+            for resolution in resolution_order[selected_index + 1 :]:
+                edge = RESOLUTION_MAX_EDGE[resolution]
+                if edge < current_edge:
+                    resolutions.append(resolution)
+                    current_edge = edge
+        if source.media.media_class in {MediaClass.IMAGE, MediaClass.AUDIO}:
+            resolutions = [options.resolution]
+
+        attempts: list[ConversionOptions] = []
+        for resolution in resolutions:
+            for quality in quality_steps:
+                attempt = ConversionOptions(
+                    target=target,
+                    quality_percent=quality,
+                    resolution=resolution,
+                    audio=options.audio,
+                )
+                if attempt not in attempts:
+                    attempts.append(attempt)
+                if len(attempts) == 5:
+                    return tuple(attempts)
+        return tuple(attempts)
 
     async def _compress(
         self,
@@ -646,7 +839,7 @@ class MediaProcessor:
             "-show_entries",
             (
                 "format=format_name,duration:"
-                "stream=index,codec_type,codec_name,width,height,duration,avg_frame_rate,"
+                "stream=index,codec_type,codec_name,width,height,duration,nb_frames,avg_frame_rate,"
                 "r_frame_rate,channels,sample_rate:stream_disposition=attached_pic"
             ),
             "-of",
@@ -695,6 +888,11 @@ class MediaProcessor:
             disposition = item.get("disposition") or {}
             average_rate = self._fraction(item.get("avg_frame_rate"))
             nominal_rate = self._fraction(item.get("r_frame_rate"))
+            if codec_name == "gif" and raw_format.get("format_name") == "gif":
+                frame_count = self._optional_int(item.get("nb_frames"))
+                duration = self._optional_float(item.get("duration"))
+                if average_rate <= 0 and frame_count and duration and duration > 0:
+                    average_rate = frame_count / duration
             # GIF timestamps use hundredths of a second. FFprobe can report that
             # 100 Hz timebase as r_frame_rate even for a 10 FPS animation.
             gif_rate = (
@@ -854,6 +1052,9 @@ class MediaProcessor:
         output_path: Path,
         source: ProbeInfo,
         options: ConversionOptions,
+        *,
+        sample_start_seconds: float | None = None,
+        sample_duration_seconds: float | None = None,
     ) -> list[str]:
         command = [
             self._settings.ffmpeg_path,
@@ -874,15 +1075,22 @@ class MediaProcessor:
             INPUT_FORMAT_WHITELIST,
             "-threads",
             str(self._settings.ffmpeg_threads),
-            "-i",
-            os.fspath(input_path),
+        ]
+        if sample_start_seconds is not None:
+            command.extend(["-ss", f"{max(0.0, sample_start_seconds):.3f}"])
+        command.extend(["-i", os.fspath(input_path)])
+        if sample_duration_seconds is not None:
+            command.extend(["-t", f"{max(0.1, sample_duration_seconds):.3f}"])
+        command.extend(
+            [
             "-map_metadata",
             "-1",
             "-map_chapters",
             "-1",
             "-sn",
             "-dn",
-        ]
+            ]
+        )
 
         if options.target in {Target.VIDEO_MP4, Target.VIDEO_WEBM}:
             self._append_video_args(command, source, options)

@@ -29,6 +29,23 @@ def strings_in(value):
 def finalize(path):
     workflow = plistlib.loads(path.read_bytes())
     actions = workflow['WFWorkflowActions']
+    # Cherri rawAction preserves native HTTP parameter dictionaries but emits
+    # a non-native action identifier. Normalize supported HTTP actions.
+    for action in actions:
+        if action['WFWorkflowActionIdentifier'] == 'is.workflow.actions.rawaction':
+            params = action['WFWorkflowActionParameters']
+            assert params.get('WFHTTPMethod') in ('POST', 'DELETE')
+            assert 'WFURL' in params and 'WFHTTPHeaders' in params
+            if params.get('WFHTTPBodyType') == 'JSON':
+                assert isinstance(params.get('WFJSONValues', {}).get('Value'), dict)
+            else:
+                assert params.get('WFHTTPBodyType') in ('File', None)
+            action['WFWorkflowActionIdentifier'] = 'is.workflow.actions.downloadurl'
+    # ExtensionInput is a native input token, not a named variable. Cherri's
+    # extra VariableName can make native actions resolve it as empty input.
+    for node in walk(actions):
+        if node.get('Type') == 'ExtensionInput':
+            node.pop('VariableName', None)
     # Exported Shortcuts use `text`, with an explicit token-string input.
     # Missing input opens a runtime text prompt; preceding actions are not enough.
     for action in actions:
@@ -42,11 +59,21 @@ def finalize(path):
         a.get('WFWorkflowActionParameters', {}).get('CustomOutputName'): i
         for i, a in enumerate(actions)
     }
+    # Get Name uses the selected file directly. Cherri's Get File Detail
+    # definition uses WFFolder and leaves the native File input empty.
+    file_name = actions[names['inputName']]
+    assert file_name['WFWorkflowActionIdentifier'] == 'is.workflow.actions.getitemname'
+    file_params = file_name['WFWorkflowActionParameters']
+    assert 'WFFolder' not in file_params
+    assert file_params['WFInput']['Value'] == {
+        'Type': 'Variable', 'VariableName': 'inputFile'
+    }
     questions = workflow['WFWorkflowImportQuestions']
     assert len(questions) == 3, 'Expected three setup questions'
     config = ('baseURL', 'clientID', 'clientSecret')
     labels = ('API Base URL', 'Access Client ID', 'Access Client Secret')
-    for name, label in zip(config, labels, strict=False):
+    for position, name in enumerate(config):
+        label = labels[position]
         question, = [q for q in questions if q['Text'].startswith(label)]
         index = names[name]
         parameters = actions[index]['WFWorkflowActionParameters']
@@ -77,6 +104,37 @@ def finalize(path):
         for i, a in enumerate(actions)
         if a.get('WFWorkflowActionParameters', {}).get('UUID')
     }
+    assert len(uuids) == sum(
+        bool(a.get('WFWorkflowActionParameters', {}).get('UUID')) for a in actions
+    ), 'Compiler reused an action UUID'
+    groups = set()
+    stack = []
+    for action in actions:
+        params = action.get('WFWorkflowActionParameters', {})
+        group = params.get('GroupingIdentifier')
+        if not group:
+            continue
+        mode = params['WFControlFlowMode']
+        if mode == 0:
+            assert group not in groups, 'Compiler reused a control-flow group'
+            groups.add(group)
+            stack.append((group, action['WFWorkflowActionIdentifier']))
+        else:
+            assert stack and stack[-1] == (group, action['WFWorkflowActionIdentifier'])
+            if mode == 2:
+                stack.pop()
+    assert not stack, 'Unclosed control-flow group'
+    for action in actions:
+        if action['WFWorkflowActionIdentifier'] != 'is.workflow.actions.choosefrommenu':
+            continue
+        params = action['WFWorkflowActionParameters']
+        if params['WFControlFlowMode'] == 0:
+            titles = [a['WFWorkflowActionParameters']['WFMenuItemTitle'] for a in actions
+                      if a['WFWorkflowActionIdentifier'] == 'is.workflow.actions.choosefrommenu'
+                      and a['WFWorkflowActionParameters']['GroupingIdentifier']
+                      == params['GroupingIdentifier']
+                      and a['WFWorkflowActionParameters']['WFControlFlowMode'] == 1]
+            assert [item['WFValue'] for item in params['WFMenuItems']] == titles
     for index, action in enumerate(actions):
         for node in walk(action):
             if node.get('Type') == 'ActionOutput':
@@ -87,7 +145,7 @@ def finalize(path):
         a for a in actions
         if a['WFWorkflowActionIdentifier'] == 'is.workflow.actions.downloadurl'
     ]
-    assert len(http) == 15
+    assert len(http) == 8
     for action in http:
         params = action['WFWorkflowActionParameters']
         fields = params['WFHTTPHeaders']['Value']['WFDictionaryFieldValueItems']
@@ -100,24 +158,36 @@ def finalize(path):
             ref, = value['attachmentsByRange'].values()
             expected_uuid = actions[names[name]]['WFWorkflowActionParameters']['UUID']
             assert ref['OutputUUID'] == expected_uuid
-        if params['WFHTTPMethod'] == 'POST':
+        if params['WFHTTPMethod'] == 'POST' and params.get('WFHTTPBodyType') == 'File':
             assert 'Upload-Filename' in headers
         destination = params['WFURL']['Value']
-        assert destination['string'] == '\ufffc'
-        ref, = destination['attachmentsByRange'].values()
-        expected = {'POST': 'createURL', 'DELETE': 'statusURL'}
-        if params['WFHTTPMethod'] in expected:
-            assert ref['VariableName'] == expected[params['WFHTTPMethod']]
+        suffix = ''
+        if params['WFHTTPMethod'] == 'POST' and params.get('WFHTTPBodyType') == 'JSON':
+            if destination['string'] == '\ufffc/start':
+                suffix = '/start'
+            else:
+                assert destination['string'] == '\ufffc'
         else:
-            assert ref['VariableName'] in ('statusURL', 'contentURL')
+            assert destination['string'] == '\ufffc'
+        ref, = destination['attachmentsByRange'].values()
+        if params['WFHTTPMethod'] == 'POST' and params.get('WFHTTPBodyType') == 'File':
+            assert ref['VariableName'] == 'createURL'
+        elif params['WFHTTPMethod'] == 'DELETE':
+            assert ref['VariableName'] == 'statusURL'
+        elif params['WFHTTPMethod'] == 'POST':
+            if suffix:
+                assert ref['VariableName'] == 'statusURL'
+            else:
+                assert ref['VariableName'] in ('estimateURL', 'startURL')
+        else:
+            assert ref['VariableName'] in ('statusURL', 'contentURL', 'estimateURL')
     repeats = [a['WFWorkflowActionParameters'] for a in actions
                if a['WFWorkflowActionIdentifier'] == 'is.workflow.actions.repeat.count']
     assert len(repeats) == 2 and repeats[0]['WFRepeatCount'] == 200
     assert actions[-1]['WFWorkflowActionIdentifier'] == 'is.workflow.actions.share'
-    assert actions[-2]['WFWorkflowActionParameters']['WFHTTPMethod'] == 'DELETE'
-    assert actions[-3]['WFWorkflowActionIdentifier'] == 'is.workflow.actions.setitemname'
-    assert actions[-4]['WFWorkflowActionParameters']['CustomOutputName'] == 'downloaded'
-    assert actions[-5]['WFWorkflowActionIdentifier'] == 'is.workflow.actions.delay'
+    assert actions[-2]['WFWorkflowActionIdentifier'] == 'is.workflow.actions.setitemname'
+    assert actions[-3]['WFWorkflowActionParameters']['CustomOutputName'] == 'downloaded'
+    assert actions[-4]['WFWorkflowActionIdentifier'] == 'is.workflow.actions.delay'
     strings = set(strings_in(workflow))
     if path.name.startswith('Convert Media'):
         targets = {
@@ -126,9 +196,10 @@ def finalize(path):
         }
         assert targets <= strings
         assert any('/v1/jobs?target=' in value for value in strings)
+        assert any('/v1/jobs/' in value and '/estimate' in value for value in strings)
+        assert any('/v1/jobs/' in value and '/start' in value for value in strings)
     else:
-        assert any('/v1/compressions' in value for value in strings)
-        assert not any('/v1/compressions?' in value for value in strings)
+        assert any('/v1/compressions?prepare_only=true' in value for value in strings)
     workflow['WFWorkflowName'] = path.name.removesuffix('_unsigned.shortcut')
     path.write_bytes(plistlib.dumps(workflow, sort_keys=False))
     print(
