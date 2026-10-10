@@ -15,15 +15,14 @@
   <link rel="icon" href="/favicon.svg" type="image/svg+xml">
   <link rel="apple-touch-icon" href="/assets/apple-touch-icon.png">
   <link rel="manifest" href="/manifest.webmanifest">
-  <link rel="stylesheet" href="/assets/app.css?v=workflows2">
-  <script src="/assets/app.js?v=workflows2" defer></script>
+  <link rel="stylesheet" href="/assets/app.css?v=workflows3">
+  <script src="/assets/app.js?v=workflows3" defer></script>
 </head>
 <body>
   <header class="masthead">
     <a class="brand" href="/" aria-label="Media Manager home">
       <img src="/favicon.svg" alt="" width="36" height="36">
       <span>Media Manager</span>
-      <span class="brand-label">Converter</span>
     </a>
     <p id="connection-status" class="service-note" hidden role="status"><span aria-hidden="true"></span>Offline · conversion paused</p>
   </header>
@@ -34,12 +33,13 @@
       <button id="history-button" class="secondary-action" type="button" aria-expanded="false" aria-controls="history-panel">History</button>
     </section>
 
-    <section class="bench" aria-label="Media conversion">
-      <nav id="mode-switch" class="mode-switch" aria-label="Choose a media task">
-        <button type="button" data-mode="download" aria-pressed="false">Download</button>
-        <button type="button" data-mode="convert" aria-pressed="true">Convert</button>
-        <button type="button" data-mode="compress" aria-pressed="false">Compress</button>
-      </nav>
+    <nav id="mode-switch" class="mode-switch" aria-label="Choose a media task">
+      <button type="button" data-mode="download" aria-pressed="false">Download</button>
+      <button type="button" data-mode="convert" aria-pressed="true">Convert</button>
+      <button type="button" data-mode="compress" aria-pressed="false">Compress</button>
+    </nav>
+
+    <section class="bench" aria-label="Media workspace">
       <form id="download-form" class="download-form" hidden>
         <div class="section-label"><span>Download from a link</span><small>Review the file before you save it</small></div>
         <label class="url-field" for="media-url">Media URL<input id="media-url" name="url" type="url" required inputmode="url" autocomplete="url" placeholder="https://…"></label>

@@ -14,11 +14,11 @@ const convert = read("shortcuts/convert.cherri");
 const compress = read("shortcuts/compress.cherri");
 const spec = read("shortcuts/spec.md");
 
-assert.match(html, /app\.css\?v=workflows2/);
-assert.match(html, /app\.js\?v=workflows2/);
-assert.match(worker, /media-manager-shell-workflows2/);
-assert.match(worker, /app\.css\?v=workflows2/);
-assert.match(worker, /app\.js\?v=workflows2/);
+assert.match(html, /app\.css\?v=workflows3/);
+assert.match(html, /app\.js\?v=workflows3/);
+assert.match(worker, /media-manager-shell-workflows3/);
+assert.match(worker, /app\.css\?v=workflows3/);
+assert.match(worker, /app\.js\?v=workflows3/);
 assert.match(worker, /url\.pathname\.startsWith\("\/v1\/"\)/);
 
 for (const mode of ["download", "convert", "compress"]) {

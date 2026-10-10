@@ -270,8 +270,8 @@ async function main() {
       for (const name of names) for (const request of await (await caches.open(name)).keys()) paths.push(new URL(request.url).pathname + new URL(request.url).search);
       return { names, paths };
     });
-    assert.ok(cached.names.includes("media-manager-shell-workflows2"));
-    assert.ok(cached.paths.includes("/assets/app.css?v=workflows2"));
+    assert.ok(cached.names.includes("media-manager-shell-workflows3"));
+    assert.ok(cached.paths.includes("/assets/app.css?v=workflows3"));
     assert.equal(cached.paths.some(p => p.startsWith("/v1/")), false);
     await page.reload();
     await $("drop-zone").waitFor({ state: "visible" });

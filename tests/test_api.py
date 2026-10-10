@@ -744,8 +744,8 @@ async def test_web_interface_and_assets_are_served_with_browser_security_headers
     assert worker.headers["service-worker-allowed"] == "/"
     assert 'url.pathname.startsWith("/v1/")' in worker.text
     assert 'request.mode === "navigate" && url.pathname === "/"' in worker.text
-    assert '["/assets/app.js?v=workflows2", "text/javascript"]' in worker.text
-    assert 'src="/assets/app.js?v=workflows2"' in responses["/"].text
+    assert '["/assets/app.js?v=workflows3", "text/javascript"]' in worker.text
+    assert 'src="/assets/app.js?v=workflows3"' in responses["/"].text
     assert "navigator.canShare?.({ files: [file] })" in responses["/assets/app.js"].text
     assert "rememberJob(job.id)" in responses["/assets/app.js"].text
     assert 'item.setAttribute("aria-current", "step")' in responses["/assets/app.js"].text

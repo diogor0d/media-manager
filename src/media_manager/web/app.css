@@ -46,7 +46,6 @@ button:disabled { cursor: not-allowed; opacity: .48; }
 .masthead { display: flex; align-items: center; justify-content: space-between; gap: 24px; padding: 30px 0; }
 .brand { display: inline-flex; align-items: center; gap: 11px; color: var(--ink); text-decoration: none; font-size: 17px; font-weight: 650; letter-spacing: -.5px; }
 .brand img { width: 36px; height: 36px; border-radius: 11px; box-shadow: 0 4px 10px rgba(44, 65, 115, .13); }
-.brand .brand-label { margin-left: 7px; padding: 7px 12px; background: var(--surface); border: 1px solid var(--edge); border-radius: 20px; color: var(--muted); font-size: 11px; font-weight: 500; letter-spacing: 0; }
 .service-note { display: flex; align-items: center; gap: 7px; margin: 0; font-size: 12px; color: var(--muted); }
 .service-note span, .ready-label span { width: 6px; height: 6px; border-radius: 50%; background: var(--ready); flex: 0 0 auto; }
 .service-note.is-offline span { background: var(--fault); }
@@ -66,9 +65,12 @@ button:disabled { cursor: not-allowed; opacity: .48; }
   backdrop-filter: blur(28px) saturate(140%);
 }
 .bench:has(#drop-zone:not([hidden])) { display: grid; grid-template-columns: minmax(0, .85fr) minmax(0, 1.15fr); }
-.mode-switch { grid-column: 1 / -1; display: flex; justify-content: center; gap: 4px; width: fit-content; margin: 20px auto 0; padding: 4px; border: 1px solid var(--edge); border-radius: 26px; background: var(--surface); }
-.mode-switch button { min-width: 104px; min-height: 44px; padding: 0 18px; border: 0; border-radius: 22px; background: transparent; color: var(--muted); font-size: 12px; font-weight: 600; cursor: pointer; }
-.mode-switch button[aria-pressed="true"] { color: var(--ink); background: var(--glass); box-shadow: 0 2px 8px rgba(44, 65, 115, .13), inset 0 1px 0 var(--edge); }
+.mode-switch { display: flex; justify-content: flex-start; gap: 24px; margin: 0 0 14px; border-bottom: 1px solid var(--rule); }
+.mode-switch button { position: relative; min-width: 0; min-height: 48px; padding: 0 2px; border: 0; background: transparent; color: var(--muted); font-size: 13px; font-weight: 550; cursor: pointer; }
+.mode-switch button::after { position: absolute; right: 0; bottom: -1px; left: 0; height: 2px; background: transparent; content: ""; }
+.mode-switch button[aria-pressed="true"] { color: var(--blue); }
+.mode-switch button[aria-pressed="true"]::after { background: var(--blue); }
+.mode-switch button:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; border-radius: 3px; }
 .download-form { grid-column: 1 / -1; width: min(760px, calc(100% - 48px)); margin: 34px auto; padding: 28px; border: 1px solid var(--rule); border-radius: 22px; background: var(--surface); }
 .download-form .section-label { margin-bottom: 24px; }
 .url-field { display: grid; gap: 10px; margin-bottom: 22px; font-size: 12px; font-weight: 600; }
@@ -286,13 +288,12 @@ footer:has(.install-hint[hidden]) { display: none; }
   .masthead { padding: 20px 0; gap: 14px; }
   .brand { font-size: 14px; gap: 8px; }
   .brand img { width: 32px; height: 32px; }
-  .brand .brand-label { display: none; }
   .service-note { max-width: 130px; font-size: 10px; line-height: 1.4; }
   .intro { padding: 14px 0 22px; }
   .bench { min-height: 0; border-radius: 25px; }
   .bench:has(#drop-zone:not([hidden])) { grid-template-columns: 1fr; }
-  .mode-switch { width: calc(100% - 28px); margin: 14px 14px 0; }
-  .mode-switch button { min-width: 0; flex: 1; padding-inline: 10px; }
+  .mode-switch { width: 100%; gap: 0; }
+  .mode-switch button { flex: 1; }
   .download-form { width: auto; margin: 20px 12px; padding: 20px; }
   .download-options { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 4px 12px; }
   .workflow-options { grid-template-columns: 1fr; gap: 10px; }
