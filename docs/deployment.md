@@ -67,7 +67,8 @@ sidecar's request-ID behavior to accept and correlate the bridge's UUID
 starting a second download. The current bridge writes its local reservation
 before submitting and will not repeat a submission after an ambiguous result.
 The additive companion sidecar patch and disposable download/correlation checks
-passed locally. Production sidecar activation and verification remain pending.
+passed locally. See the [2026-10-10 deployment record](release-2026-10-10.md)
+for the subsequent verified activation; repeat those checks for a new release.
 
 The optional Telegram bot uses `MEDIA_MANAGER_TELEGRAM_BOT_TOKEN`,
 `MEDIA_MANAGER_TELEGRAM_CHAT_ID`, `MEDIA_MANAGER_TELEGRAM_USER_ID`, and

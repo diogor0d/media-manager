@@ -48,6 +48,7 @@ See [workflow setup and behavior](docs/workflows.md), [API contract](docs/api.md
 and [deployment and rollback](docs/deployment.md). Live bot, installed Shortcut,
 physical iPhone, and production acceptance are separate rollout gates.
 Current local evidence is in the [2026-10-09 acceptance record](docs/validation-implementation-2026-10-09.md).
+The [2026-10-10 deployment record](docs/release-2026-10-10.md) distinguishes the live release from remaining Telegram and installed-device gates.
 
 ## Architecture
 

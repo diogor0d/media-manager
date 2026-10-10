@@ -1,5 +1,17 @@
 # Project History
 
+## 2026-10-10 - Unified downloader release on diogoserver2
+
+- Committed and pushed the shared Download/Convert/Compress workflows and the
+  authenticated, correlated MeTube sidecar bridge; activated both services while
+  preserving MeTube itself, original files, and all four retained results.
+- Reconciled the existing verified browser/Shortcut owners privately. Updated
+  PyJWT to 2.15.1 and corrected linked manual processing status after a live test.
+- The final source passed 126 Python tests. Live responsive Download controls,
+  authentication, all four real MeTube pipelines, legacy compression/conversion,
+  accepted-source restart recovery, and an isolated old-image persistence restore
+  passed. Telegram and installed-device acceptance remain separate; see the [release record](release-2026-10-10.md).
+
 ## 2026-10-09 - Prepared processing, estimates, and private integrations
 
 - Added prepared conversion/compression flows with a separate estimate and
