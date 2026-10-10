@@ -409,7 +409,11 @@ class DownloadManager:
             reverse=True,
         )
         total = len(records)
-        return [self._history_view(record) for record in records[offset : offset + limit]], total
+        page = records[offset : offset + limit]
+        for record in page:
+            if record.child_id is not None:
+                await self._sync_child_state(record)
+        return [self._history_view(record) for record in page], total
 
     async def download(self, download_id: str, owner: str) -> tuple[Path, str, str]:
         owner = self._canonical_owner(owner)
@@ -883,14 +887,25 @@ class DownloadManager:
             await self._save()
 
     async def _sync_child_state(self, record: _Download) -> None:
-        if record.child_id is None or not record.auto_process:
+        if record.child_id is None:
             return
         try:
             child = await self.jobs.get(record.child_id, record.owner)
         except Exception:
             return
-        if getattr(child.state, "value", child.state) == "failed":
+        child_state = getattr(child.state, "value", child.state)
+        if child_state == "failed":
             self._preserve_source_after_processing_error(record, RuntimeError("child failed"))
+            await self._save()
+        elif (
+            not record.auto_process
+            and record.state is DownloadState.AWAITING_REVIEW
+            and child_state in {"queued", "processing", "ready"}
+        ):
+            # Manual child starts happen through the jobs API, outside this manager.
+            # Match _start_child: once accepted, the original source is ready/recoverable.
+            record.state = DownloadState.READY
+            record.error = None
             await self._save()
 
     def _preserve_source_after_processing_error(self, record: _Download, exc: Exception) -> None:

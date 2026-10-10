@@ -503,6 +503,107 @@ async def test_auto_process_persists_parent_link_before_starting_child(tmp_path:
 
 
 @pytest.mark.asyncio
+async def test_manual_child_state_syncs_parent_and_preserves_source_for_retry(
+    tmp_path: Path,
+) -> None:
+    class SwitchProcessor(FakeProcessor):
+        fail_conversion = True
+
+        async def convert(self, *args, **kwargs):
+            if self.fail_conversion:
+                raise RuntimeError("synthetic conversion failure")
+            return await super().convert(*args, **kwargs)
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST":
+            return httpx.Response(202, json={})
+        if request.url.path.endswith(("/file", "/download")):
+            return httpx.Response(
+                200,
+                headers={
+                    "content-disposition": 'attachment; filename="manual-source.mp4"',
+                    "content-type": "video/mp4",
+                },
+                content=b"original-source",
+            )
+        return httpx.Response(200, json={"status": "complete"})
+
+    settings = Settings(
+        work_dir=tmp_path / "work",
+        auth_mode=AuthMode.DISABLED,
+        public_base_url="http://localhost:8080",
+        max_upload_bytes=1024,
+        max_output_bytes=1024,
+        max_live_jobs=2,
+        cleanup_interval_seconds=3600,
+        result_ttl_seconds=600,
+        metube_sidecar_url="http://sidecar.local",
+    )
+    processor = SwitchProcessor()
+    jobs = JobManager(settings, processor)
+    await jobs.start()
+    downloads = DownloadManager(
+        settings, jobs, processor, transport=httpx.MockTransport(handler)
+    )
+    await downloads.start()
+    options = ConversionOptions(target="video-mp4")
+    parent = await downloads.create(
+        DownloadRequest(
+            url="https://video.example/manual-child",
+            workflow="convert",
+            conversion_options=options,
+        ),
+        "user:test",
+    )
+    for _ in range(200):
+        parent_view = await downloads.get(parent.id, "user:test")
+        if parent_view.state is DownloadState.AWAITING_REVIEW:
+            break
+        await asyncio.sleep(0.01)
+    assert parent_view.state is DownloadState.AWAITING_REVIEW
+
+    failed_child = await downloads.process(
+        parent.id, "user:test", conversion_options=options, auto_start=False
+    )
+    await jobs.start_prepared(failed_child.id, "user:test", options)
+    for _ in range(200):
+        failed_child = await jobs.get(failed_child.id, "user:test")
+        if failed_child.state.value == "failed":
+            break
+        await asyncio.sleep(0.01)
+    assert failed_child.state.value == "failed"
+
+    review = await downloads.get(parent.id, "user:test")
+    assert review.state is DownloadState.AWAITING_REVIEW
+    assert review.error is not None and review.error.code == "PROCESSING_FAILED"
+    source_path, _, _ = await downloads.download(parent.id, "user:test")
+    assert source_path.read_bytes() == b"original-source"
+
+    processor.fail_conversion = False
+    retry_child = await downloads.process(
+        parent.id, "user:test", conversion_options=options, auto_start=False
+    )
+    await jobs.start_prepared(retry_child.id, "user:test", options)
+    for _ in range(200):
+        retry_child = await jobs.get(retry_child.id, "user:test")
+        if retry_child.state.value == "ready":
+            break
+        await asyncio.sleep(0.01)
+    assert retry_child.state.value == "ready"
+
+    ready = await downloads.get(parent.id, "user:test")
+    entries, _ = await downloads.history("user:test")
+    history_parent = next(item for item in entries if item["id"] == parent.id)
+    assert ready.state is DownloadState.READY
+    assert history_parent["job"]["state"] == DownloadState.READY.value
+    assert ready.error is None
+    source_path, _, _ = await downloads.download(parent.id, "user:test")
+    assert source_path.read_bytes() == b"original-source"
+    await downloads.stop()
+    await jobs.stop()
+
+
+@pytest.mark.asyncio
 async def test_auto_process_retries_queue_full_child_preparation_after_restart(
     tmp_path: Path,
 ) -> None:
