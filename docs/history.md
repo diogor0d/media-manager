@@ -1,5 +1,17 @@
 # Project History
 
+## 2026-10-11 - Compact workflow navigation deployed
+
+- Replaced the oversized centered capsule inside the media panel with compact
+  Download/Convert/Compress navigation below the page title and an active underline.
+  Removed the Converter badge and advanced the synchronized PWA cache to workflows3.
+- Committed, pushed, and deployed source 85fc994 to only the Media Manager API on
+  diogoserver2. Chromium/WebKit each passed 30 local and 30 live navigation cases;
+  real local estimate/start/compression/history checks passed in both engines.
+- All four retained records and three output checksums are unchanged. MeTube and
+  its sidecar kept their exact containers/images. See the dated
+  [release and rollback record](navigation-release-2026-10-11.md).
+
 ## 2026-10-10 - Unified downloader release on diogoserver2
 
 - Committed and pushed the shared Download/Convert/Compress workflows and the
